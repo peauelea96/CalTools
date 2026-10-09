@@ -1,0 +1,11 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.github$
+^README\.Rmd$
+^README\.md$
+^PUBLISHING\.md$
+^VALIDATION\.md$
+^tools$
+^validation$
+^README\.knit\.md$
+^VALIDATION_0\.2\.1\.md$

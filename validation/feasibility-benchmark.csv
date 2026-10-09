@@ -1,0 +1,10 @@
+"n","p","method","median_seconds","feasible","status","solver","max_scaled_residual"
+100,8,"projection",0.00700000000000056,TRUE,"feasible","alternating-projections",9.64349403749975e-09
+100,8,"auto",0.00100000000000033,TRUE,"feasible","dual-witness",1.82060882105087e-13
+100,8,"lp",0.00199999999999978,TRUE,"feasible","lp",1.39512202953898e-12
+500,8,"projection",0.00899999999999945,TRUE,"feasible","alternating-projections",9.53759789872195e-09
+500,8,"auto",0.00199999999999978,TRUE,"feasible","dual-witness",1.37322387971612e-13
+500,8,"lp",0.00999999999999979,TRUE,"feasible","lp",7.75016910655237e-13
+2000,8,"projection",0.0209999999999999,TRUE,"feasible","alternating-projections",9.80876043300893e-09
+2000,8,"auto",0.00400000000000045,TRUE,"feasible","dual-witness",5.88274023016517e-13
+2000,8,"lp",0.0869999999999997,TRUE,"feasible","lp",5.64673133534428e-13

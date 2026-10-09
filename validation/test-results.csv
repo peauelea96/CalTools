@@ -1,0 +1,26 @@
+"file","test","nb","failed","skipped","error","warning","passed"
+"test-calibration.R","linear calibration agrees with the analytic formula and sampling",3,0,FALSE,FALSE,0,3
+"test-calibration.R","signed and zero weights require a positive explicit metric",6,0,FALSE,FALSE,0,6
+"test-calibration.R","permanent clipping counterexample is feasible and solved correctly",4,0,FALSE,FALSE,0,4
+"test-calibration.R","random dual solutions agree with independent reference QP and KKT",105,0,FALSE,FALSE,0,105
+"test-calibration.R","redundant constraints, zero totals and negative totals are handled",6,0,FALSE,FALSE,0,6
+"test-calibration.R","nonlinear calibration uses correct derivatives with varying q",4,0,FALSE,FALSE,0,4
+"test-calibration.R","distance functions include endpoint limits and correct raking name",5,0,FALSE,FALSE,0,5
+"test-calibration.R","input and nonconvergence checks never return uncalibrated success",5,0,FALSE,FALSE,0,5
+"test-diagnostics.R","incompatibilities carry checkable null-space relations",10,0,FALSE,FALSE,0,10
+"test-diagnostics.R","diagnostics handle zero columns, no columns, and full rank",9,0,FALSE,FALSE,0,9
+"test-diagnostics.R","diagnostic rank and target tolerances have separate roles",5,0,FALSE,FALSE,0,5
+"test-diagnostics.R","preflight distinguishes algebraic and bounded infeasibility",4,0,FALSE,FALSE,0,4
+"test-diagnostics.R","workflows stop on conflicting totals unless merging is explicit",10,0,FALSE,FALSE,0,10
+"test-diagnostics.R","alternating projections return witnesses or an inconclusive status",7,0,FALSE,FALSE,0,7
+"test-negative-totals.R","negative totals work with positive starting and final weights",13,0,FALSE,FALSE,0,13
+"test-negative-totals.R","all-negative targets do not cause false convergence",8,0,FALSE,FALSE,0,8
+"test-tools.R","LP feasibility supports signed bounds and zero/negative totals",11,0,FALSE,FALSE,0,11
+"test-tools.R","random constructed feasible LPs return verified witnesses",40,0,FALSE,FALSE,0,40
+"test-tools.R","minimal directional relaxation has an analytic value",5,0,FALSE,FALSE,0,5
+"test-tools.R","bound grids distinguish absolute and multiplicative endpoints",4,0,FALSE,FALSE,0,4
+"test-tools.R","diagnostics and aggregation preserve dimensions and names",12,0,FALSE,FALSE,0,12
+"test-tools.R","BFS reaches depth two and keeps every original residual",6,0,FALSE,FALSE,0,6
+"test-tools.R","recommendations never join a variable to itself on tied scores",2,0,FALSE,FALSE,0,2
+"test-tools.R","ordered actions use supplied bounds and empty lists are defined",4,0,FALSE,FALSE,0,4
+"test-tools.R","inclusion probability generator terminates at both endpoints",11,0,FALSE,FALSE,0,11
