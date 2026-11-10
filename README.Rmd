@@ -2,7 +2,7 @@
 output: github_document
 ---
 
-# CalTools 0.3.0: advanced survey calibration
+# CalTools 0.4.0: advanced survey calibration
 
 CalTools separates three questions: **are the controls compatible, do bounded
 weights exist, and are the fitted weights optimal for the chosen distance?**
@@ -10,6 +10,221 @@ The package provides a unified `calibrate()` interface, vector weight bounds,
 mixed equality/inequality controls, independent feasibility diagnostics,
 projection certificates, and automatic or assisted margin/bound workflows.
 All bounds in this API refer to **final weights**, not factors.
+
+## Scalable solvers introduced in 0.4.0
+
+The previous interface is retained, including `qp`, `dual`, `projection`, and
+`newton`; the initial ordering of output fields (`g`, `lambda`); nonquadratic
+distances; and the explicit metric for signed starting weights. The legacy
+`projection` solver remains the earlier irreversible fixing procedure:
+**it is not Dykstra's algorithm**.
+
+The review identified two bottlenecks: constructing `diag(n)` and
+`diag(1/h, n)` in QP, and converting sparse input matrices to dense matrices
+using `as.matrix(X)`. The new infrastructure prepares a sparse control matrix
+and a vector `h`; the new solvers avoid dense n-by-n matrices. Dykstra and
+semismooth Newton do form small dense matrices whose dimensions depend on the
+number of controls. They are not intended for hundreds of thousands of
+controls.
+
+### Interface and reproducible example
+
+```r
+library(CalTools)
+library(Matrix)
+set.seed(42)
+n <- 10000
+X <- cbind(N = rep(1, n), x = rnorm(n), zone = rbinom(n, 1, .3))
+d <- runif(n, .8, 1.2)
+known_weights <- pmin(2, pmax(.2, d + .15 * X[, "x"]))
+t <- as.numeric(crossprod(X, known_weights))
+fit <- calibrate_quadratic(Matrix(X, sparse = TRUE), d, t,
+  lower = .2, upper = 2, direction = c("=", "=", "<="),
+  solver = "osqp", tol = 1e-7, max_iter = 20000)
+fit$status
+fit$kkt
+calibration_diagnostics(fit)$totals
+summary(calibration_diagnostics(fit)$weights)
+
+# Interval endpoints REPLACE totals and direction.
+interval_fit <- calibrate_quadratic(X, d,
+  total_lower = c(t[1], t[2] - 10, -Inf),
+  total_upper = c(t[1], t[2] + 10, t[3]),
+  lower = .2, upper = 2, solver = "dykstra")
+
+# The legacy interface also supports the new solvers.
+fit2 <- calibrate(X, d, t, method = "truncated", lower = .2, upper = 2,
+  direction = c("=", "=", "<="), solver = "dual_newton",
+  control = list(fallback_osqp = TRUE), max_iter = 20000)
+```
+
+`X` always has **units in rows and controls in columns**. Bounds apply to
+final weights `w`, while the calibration factors are `g = w/d`; bounds on `g`
+are never converted implicitly. The common objective is
+`sum((w-d)^2/(2*d*q))` for positive `d` and `q`. The historical option
+`metric_scale` replaces `d` in the denominator and must be positive; it is an
+explicit choice of metric, not an automatic change. All solvers use the same
+vector `h = metric_scale*q` (default `d*q`).
+
+### Algorithms and mathematical rationale
+
+* **OSQP**: `P = diag(1/h)`, linear term `-d/h`, and constraints
+  `l <= rbind(t(X), I) %*% w <= u`. Both `P` and `I` are sparse diagonal
+  matrices. The objective reported by CalTools includes the constant omitted
+  by the QP formulation. Both the R6 interface in osqp 0.6 and the S7
+  interface in osqp 1.0 are supported; validation was performed with
+  **osqp 1.0.0**. `control` passes backend settings, including `verbose`.
+  `warm_start` accepts weights or a previous fit; it reuses the primal
+  initialization, not a factorization across calls.
+* **Dykstra**: projects `d` onto the intersection of convex sets in the
+  `H^-1` metric. The equality block uses
+  `z + H A' (A H A')† (t-Az)`; the bounds use componentwise clipping; and
+  each half-space uses `z - H c * max(c'z-b,0)/(c'Hc)`. The correction terms
+  restore accumulated normal components, distinguishing Dykstra's method from
+  ordinary alternating projections. The implementation stores one multiplier
+  per equality, one scalar per half-space, and one n-vector for the box
+  corrections, rather than an n-by-K correction matrix. If the intersection
+  is nonempty, it converges to the unique projection, although convergence
+  can be slow near tangencies. Stopping requires feasibility, KKT conditions,
+  and stabilization. The pseudoinverse uses a relative threshold of 1e-12
+  for the Gram matrix; a nearly singular rank structure can prevent the
+  requested tolerance from being met, and this is reported.
+* **Dual semismooth Newton (experimental)**: write `B = [A; C]`,
+  `y = [alpha; mu]`, with `alpha = -lambda` and `mu >= 0`. For
+  `s = B'y`, set `w = clip(d-Hs,L,U)` and minimize
+  `phi(y) = -sum((w-d)^2/(2h) + s*w) + rhs'y`.
+  Its gradient is `rhs-Bw`; a generalized Hessian is `B H_free B'`.
+  Complementarity requires `mu >= 0`, `b-Cw >= 0`, and `mu*(b-Cw) = 0`.
+  The algorithm dynamically identifies active multipliers, regularizes the
+  Hessian, projects multipliers, and uses Armijo line search. If the Newton
+  direction fails, it attempts projected gradient steps. Fast local
+  convergence requires a sufficiently regular active-set geometry; neither
+  global convergence nor robustness to every degeneracy is claimed.
+  `control=list(regularization=1e-10, fallback_osqp=TRUE)` explicitly
+  enables an OSQP fallback. The failed attempt's state is retained in
+  `$fallback`. A dual warm start requires a compatible fit with multipliers.
+* **quadprog**: dense reference solver, limited to 2,000 units to protect
+  memory. Redundant controls are reduced before the QP is solved. `qp`
+  retains its historical meaning; `quadprog` uses the new common output
+  format.
+
+Strict convexity (`h > 0`) guarantees unique optimal weights whenever the
+feasible set is nonempty, although multipliers need not be unique. The
+projection identities and KKT conditions agree with the project's
+mathematical foundations. Failure of a projection method or Newton iteration
+does not by itself establish infeasibility.
+
+### Automatic selection and backward compatibility
+
+`calibrate_quadratic(..., solver="auto")` uses quadprog when `n <= 200`,
+`p <= 20`, the input is dense, and its density exceeds 0.2. Otherwise it
+uses OSQP if installed, or Dykstra if OSQP is unavailable. Experimental
+Newton is never selected automatically. The rationale and selected solver
+are reported in `$selection_reason` and `$solver`.
+
+`calibrate_weights` and `calibrate` retain their historical `auto` routes for
+dense inputs with up to 2,000 rows. For sparse inputs or more than 2,000
+rows, quadratic distances switch to the new solver selection. This change
+is explicit: those routes return a nonconvergence status rather than the
+numerical error raised by the old implementation. To retain the exact
+legacy route, explicitly select `dual`, `qp`, or `projection`, as appropriate.
+Raking and logit still report the use of damped Newton and do not support
+the new quadratic solvers.
+
+### Diagnostics and statuses
+
+New fit objects include weights, `g`, objective, iterations, timings,
+residuals, KKT diagnostics, multipliers, the sparse problem, and backend data:
+
+| Status | Meaning |
+|---|---|
+| `optimal_numerical` | The solver reports success and passes the KKT check at `tol` |
+| `approximate` | OSQP reports `solved inaccurate`, or a candidate fails the KKT check |
+| `not_converged` | Iteration budget exhausted, stagnation, or another failure without a certificate |
+| `infeasible_certified` | OSQP supplies a Farkas certificate verified numerically at `tol` |
+
+The last status is a **numerical certificate**, not a proof using exact
+arithmetic. The Farkas equation residual and strictly negative support are
+checked. Infeasibility statuses contain no usable fitted weights. Neither
+Dykstra nor Newton certifies infeasibility. The independent function
+`calibration_feasibility(..., direction=...)` retains the LP for that purpose.
+
+Equality and control-violation residuals are scaled by the maximum of 1 and
+the finite control endpoints; weight bounds by `max(1,abs(w))`; and
+stationarity by the gradient scale. Complementarity is measured in absolute
+objective units. This can be demanding at large scales: rescale poorly
+conditioned controls and inspect residuals. Optimal status is never based
+solely on the stabilization of weights.
+
+`lambda` retains the historical convention of `gradient = X lambda` plus
+bound normals; `$duals$controls = -lambda` uses the standard OSQP convention.
+`calibration_diagnostics(fit)` displays controls before and after fitting,
+violations, `lambda`, initial and final weights, changes, `g`, quantiles,
+bound duals, and KKT diagnostics. It also works with legacy fits produced by
+this version. Quadratic KKT diagnostics do not apply to raking or logit.
+For those fits, `status="optimal"` is retained and `$termination` is added
+without changing the initial output fields.
+
+### Installation and dependencies
+
+Matrix is a required dependency; osqp is optional. Dykstra and Newton do
+not require osqp. Explicitly requesting OSQP when it is not installed
+produces an informative error.
+
+```r
+install.packages(c("Matrix", "osqp", "quadprog", "lpSolve"))
+install.packages("CalTools_0.4.0.tar.gz", repos=NULL, type="source")
+```
+
+### Reproducible benchmark
+
+Run `Rscript benchmarks/scalable.R` from the project root. The random seed
+is 20261021. The benchmark evaluates n = 1,000, 3,000, 10,000, 50,000, and
+100,000 across three profiles (6 controls/2 inequalities/density 1;
+16/6/.05; and 16/6/.1 with tight bounds), with three repetitions. It records
+generation time, common preparation plus backend time, solve time, and total
+time, as well as objective, KKT diagnostics, iterations, statuses, active
+bounds, and R-allocated memory. Total time includes validation.
+
+Memory recorded by `Rprofmem` is cumulative R allocation, **not peak RSS**,
+and excludes OSQP's internal native allocations. Measurements include
+instrumentation overhead. Quadprog is deliberately omitted for n > 2,000.
+The results are exploratory and reflect one environment; they do not
+establish a universal performance ranking or replace tests on real data.
+
+Complete results: `benchmarks/results.csv`; environment and versions:
+`benchmarks/sessionInfo.txt`. The following sections retain the guide and
+examples for features introduced in 0.3.0.
+
+### Results measured in this environment
+
+Median total times (seconds), three repetitions, for the profile with
+16 controls, 6 inequalities, density 0.1, and tight bounds. Tolerance
+was 1e-6, with a maximum of 1,000 iterations per method. An asterisk
+indicates an approximate OSQP solution; its time therefore does not
+represent achievement of the same precision.
+
+| n | OSQP | Dykstra | Newton dual |
+|---:|---:|---:|---:|
+| 1000 | 0.007 | 0.014 | 0.007 |
+| 3000 | 0.015 | 0.015 | 0.010 |
+| 10000 | 0.114 | 0.058 | 0.022 |
+| 50000 | 1.806* | 0.236 | 0.098 |
+| 100000 | 4.395* | 0.444 | 0.226 |
+
+Of 144 completed runs, 138 passed the KKT checks and 6 were classified as
+approximate; another 36 quadprog configurations were omitted because of
+the size limit. In the tight-bounds profile, OSQP's maximum KKT residual
+was 0.00539 for 50,000 units and 0.00964 for 100,000 units. The CSV files
+retain objectives, R-allocated memory, active bounds, and separate timing
+measurements for every run.
+
+These instances favor structures with relatively few controls and do not
+demonstrate universal superiority. Validation of Newton remains limited;
+extensive tests with real data, nearly infeasible systems, and extreme
+scalings are still needed.
+
+---
 
 ## What changed in 0.3.0
 
@@ -31,7 +246,7 @@ examples, mathematical notes, tests, benchmark CSVs and validation logs.
 
 ```r
 install.packages(c("lpSolve", "quadprog"))
-install.packages("CalTools_0.3.0.tar.gz", repos=NULL, type="source")
+install.packages("CalTools_0.4.0.tar.gz", repos=NULL, type="source")
 library(CalTools)
 ```
 
@@ -134,7 +349,7 @@ are not unique.
 
 Minimizing the Lagrangian over the box gives
 
-$$w(\lambda)=\operatorname{clip}_{[L,U]}(d+HA^T\lambda).$$
+$$w_i(\lambda)=\min\{U_i,\max\{L_i,d_i+h_i(X\lambda)_i\}\}.$$
 
 A root of `Aw(lambda)=t` is a global optimum. The implementation recomputes bound
 activity at every evaluation, so a coordinate may leave a bound. The derivative
@@ -337,7 +552,7 @@ If `S(v)=v't-sigma(v)>0`, no feasible weight vector exists. Taking
 strictly infeasible finite-box problems in exact arithmetic. For any box weight
 and nonzero direction,
 
-$$\max(0,S(v)/\|v\|)\le \operatorname{dist}(t,AB)\le\|Aw-t\|.$$
+$$\max(0,S(v)/\|v\|)\le \mathrm{dist}(t,AB)\le\|Aw-t\|.$$
 
 The implementation keeps the best lower and upper distance bounds. It scales
 controls by `max(1,abs(total))` before iterating; reported distances use those
@@ -506,7 +721,7 @@ roxygen2::roxygenise(".")
 testthat::test_local(".")
 # Shell, from the parent directory:
 # R CMD build CalTools
-# R CMD check --no-manual CalTools_0.3.0.tar.gz
+# R CMD check --no-manual CalTools_0.4.0.tar.gz
 ```
 
 The current mathematical core uses dense control matrices and SVD. Mixed QP
@@ -526,7 +741,7 @@ infeasible case and a difficult boundary-feasible case.
 The implementation follows Sections 4, 5, 8 and 9 of the supplied
 *Geometry, Algorithms, and Certificates for Advanced Survey Calibration*
 (20 October 2026), with an explicit correction to the universal face-fixing
-claims in *Herramientas avanzadas de calibrado en R*. The original notes and
+claims in *Advanced Calibration Tools in R* (translated title). The original notes and
 scripts are source material, not imported runtime code.
 
 - Deville and Särndal (1992), *Calibration estimators in survey sampling*,
@@ -575,7 +790,7 @@ explicit margin aggregation.
 - [Reproducible random calibration stress tests](#reproducible-random-calibration-stress-tests)
 - [11. Reproducibility and limits](#11-reproducibility-and-limits)
 
-CalTools 0.3.0 provides bounded calibration, explicit inconsistency
+The 0.3.0 feature set, retained in CalTools 0.4.0, provides bounded calibration, explicit inconsistency
 diagnostics, feasibility checks, directional bound relaxation and
 auditable margin aggregation. All public identifiers, examples,
 messages, code comments and documentation are in English. **Version
@@ -590,7 +805,7 @@ R \>= 4.1.0 is required. Runtime dependencies are `lpSolve` and
 
 ``` r
 install.packages(c("lpSolve", "quadprog"))
-install.packages("CalTools_0.3.0.tar.gz", repos = NULL, type = "source")
+install.packages("CalTools_0.4.0.tar.gz", repos = NULL, type = "source")
 library(CalTools)
 ?calibrate_weights
 ?analyze_inconsistency
@@ -677,7 +892,7 @@ Negative totals do **not** require negative initial weights. For
 example, an auxiliary variable can take negative values while all survey
 weights are positive. The residual check is
 
-$$\max_j\frac{|(X^\top w-t)_j|}{\max(1,|t_j|)}\le\texttt{tol}.$$
+$$\max_j\frac{|(X^\top w-t)_j|}{\max(1,|t_j|)}\le\mathrm{tol}.$$
 
 It uses the absolute magnitude of each total and remains defined at
 zero.
@@ -1048,7 +1263,7 @@ testthat::test_local("CalTools")
 rmarkdown::render("CalTools/README.Rmd")
 # In a terminal:
 # R CMD build CalTools
-# R CMD check --no-manual CalTools_0.3.0.tar.gz
+# R CMD check --no-manual CalTools_0.4.0.tar.gz
 ```
 
 The numerical core is dense. Initial reduction costs about $O(np^2)$ for

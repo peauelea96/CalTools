@@ -7,28 +7,30 @@ mixed equality/inequality controls, independent feasibility diagnostics,
 projection certificates, and automatic or assisted margin/bound workflows.
 All bounds in this API refer to **final weights**, not factors.
 
-## Solvers escalables añadidos en 0.4.0
+## Scalable solvers introduced in 0.4.0
 
-Se conserva la interfaz anterior, incluidos `qp`, `dual`, `projection` y
-`newton`, el orden inicial de las salidas (`g`, `lambda`), las distancias no
-cuadráticas y la métrica explícita para pesos iniciales con signo.
-`projection` sigue siendo la regla irreversible anterior: **no es Dykstra**.
+The previous interface is retained, including `qp`, `dual`, `projection`, and
+`newton`; the initial ordering of output fields (`g`, `lambda`); nonquadratic
+distances; and the explicit metric for signed starting weights. The legacy
+`projection` solver remains the earlier irreversible fixing procedure:
+**it is not Dykstra's algorithm**.
 
-La revisión localizó dos cuellos de botella: `diag(n)` y `diag(1/h,n)` en QP,
-y la conversión inicial de matrices dispersas mediante `as.matrix(X)`.
-La nueva infraestructura prepara una matriz dispersa de controles y un vector
-h; los solvers nuevos evitan matrices densas n×n. Dykstra y Newton sí forman
-matrices densas pequeñas del tamaño del número de controles. No son métodos
-pensados para cientos de miles de controles.
+The review identified two bottlenecks: constructing `diag(n)` and
+`diag(1/h, n)` in QP, and converting sparse input matrices to dense matrices
+using `as.matrix(X)`. The new infrastructure prepares a sparse control matrix
+and a vector `h`; the new solvers avoid dense n-by-n matrices. Dykstra and
+semismooth Newton do form small dense matrices whose dimensions depend on the
+number of controls. They are not intended for hundreds of thousands of
+controls.
 
-### Interfaz y ejemplo reproducible
+### Interface and reproducible example
 
 ```r
 library(CalTools)
 library(Matrix)
 set.seed(42)
 n <- 10000
-X <- cbind(N = rep(1, n), x = rnorm(n), zona = rbinom(n, 1, .3))
+X <- cbind(N = rep(1, n), x = rnorm(n), zone = rbinom(n, 1, .3))
 d <- runif(n, .8, 1.2)
 known_weights <- pmin(2, pmax(.2, d + .15 * X[, "x"]))
 t <- as.numeric(crossprod(X, known_weights))
@@ -40,151 +42,163 @@ fit$kkt
 calibration_diagnostics(fit)$totals
 summary(calibration_diagnostics(fit)$weights)
 
-# Intervalos: sus extremos REEMPLAZAN totals y direction.
+# Interval endpoints REPLACE totals and direction.
 interval_fit <- calibrate_quadratic(X, d,
   total_lower = c(t[1], t[2] - 10, -Inf),
   total_upper = c(t[1], t[2] + 10, t[3]),
   lower = .2, upper = 2, solver = "dykstra")
 
-# La interfaz histórica también admite los solvers nuevos.
+# The legacy interface also supports the new solvers.
 fit2 <- calibrate(X, d, t, method = "truncated", lower = .2, upper = 2,
   direction = c("=", "=", "<="), solver = "dual_newton",
   control = list(fallback_osqp = TRUE), max_iter = 20000)
 ```
 
-X siempre tiene **unidades en filas y controles en columnas**. Las cotas son
-sobre w, y los factores son g=w/d; no se convierten cotas de g implícitamente.
-El objetivo común es `sum((w-d)^2/(2*d*q))`, con d,q positivos.
-La alternativa histórica `metric_scale` sustituye d en el denominador y debe
-ser positiva: no es un cambio automático del objetivo. Todos los solvers usan
-el mismo vector h=`metric_scale*q` (por defecto d*q).
+`X` always has **units in rows and controls in columns**. Bounds apply to
+final weights `w`, while the calibration factors are `g = w/d`; bounds on `g`
+are never converted implicitly. The common objective is
+`sum((w-d)^2/(2*d*q))` for positive `d` and `q`. The historical option
+`metric_scale` replaces `d` in the denominator and must be positive; it is an
+explicit choice of metric, not an automatic change. All solvers use the same
+vector `h = metric_scale*q` (default `d*q`).
 
-### Algoritmos y fundamento
+### Algorithms and mathematical rationale
 
-* **OSQP**: P=diag(1/h), término lineal -d/h y restricciones
-  `l <= rbind(t(X), I) %*% w <= u`. P e I son diagonales dispersas. El objetivo
-  que devuelve CalTools incluye la constante omitida por el QP. Se admiten
-  las interfaces R6 de osqp 0.6 y S7 de osqp 1.0; la validación ejecutada usa
-  **osqp 1.0.0**. `control` transmite ajustes del backend, incluido verbose.
-  `warm_start` acepta pesos o un fit anterior; reutiliza la inicialización
-  primal, no la factorización entre llamadas.
-* **Dykstra**: proyección de d en la intersección de conjuntos convexos bajo
-  la norma H^-1. El bloque de igualdades usa
-  `z + H A' (A H A')† (t-Az)`; las cotas, clip; cada semiespacio,
-  `z - H c * max(c'z-b,0)/(c'Hc)`. Las correcciones restauran las normales
-  acumuladas y distinguen el método de proyecciones alternadas simples.
-  Se guarda un multiplicador por igualdad, un escalar por semiespacio y
-  un vector de n correcciones para la caja, sin una matriz n×K de correcciones.
-  Para intersección no vacía converge a la proyección única; puede ser lento
-  cerca de tangencias. La parada exige factibilidad, KKT y estabilización.
-  La pseudoinversa usa un umbral relativo 1e-12 del Gram: un rango casi
-  singular puede impedir alcanzar la tolerancia, lo que se informa.
-* **Newton semisuave dual, experimental**: escribir B=[A;C], y=[alpha;mu],
-  alpha=-lambda, mu>=0. Para s=B'y, w=clip(d-Hs,L,U), minimizar
+* **OSQP**: `P = diag(1/h)`, linear term `-d/h`, and constraints
+  `l <= rbind(t(X), I) %*% w <= u`. Both `P` and `I` are sparse diagonal
+  matrices. The objective reported by CalTools includes the constant omitted
+  by the QP formulation. Both the R6 interface in osqp 0.6 and the S7
+  interface in osqp 1.0 are supported; validation was performed with
+  **osqp 1.0.0**. `control` passes backend settings, including `verbose`.
+  `warm_start` accepts weights or a previous fit; it reuses the primal
+  initialization, not a factorization across calls.
+* **Dykstra**: projects `d` onto the intersection of convex sets in the
+  `H^-1` metric. The equality block uses
+  `z + H A' (A H A')† (t-Az)`; the bounds use componentwise clipping; and
+  each half-space uses `z - H c * max(c'z-b,0)/(c'Hc)`. The correction terms
+  restore accumulated normal components, distinguishing Dykstra's method from
+  ordinary alternating projections. The implementation stores one multiplier
+  per equality, one scalar per half-space, and one n-vector for the box
+  corrections, rather than an n-by-K correction matrix. If the intersection
+  is nonempty, it converges to the unique projection, although convergence
+  can be slow near tangencies. Stopping requires feasibility, KKT conditions,
+  and stabilization. The pseudoinverse uses a relative threshold of 1e-12
+  for the Gram matrix; a nearly singular rank structure can prevent the
+  requested tolerance from being met, and this is reported.
+* **Dual semismooth Newton (experimental)**: write `B = [A; C]`,
+  `y = [alpha; mu]`, with `alpha = -lambda` and `mu >= 0`. For
+  `s = B'y`, set `w = clip(d-Hs,L,U)` and minimize
   `phi(y) = -sum((w-d)^2/(2h) + s*w) + rhs'y`.
-  Su gradiente es rhs-Bw; una Hessiana generalizada es B H_free B'.
-  La complementariedad exige mu>=0, b-Cw>=0 y mu*(b-Cw)=0.
-  Se identifican dinámicamente multiplicadores activos, se regulariza la
-  Hessiana, se proyectan multiplicadores y se aplica búsqueda Armijo.
-  Si falla la dirección Newton, se intenta gradiente proyectado. La
-  convergencia rápida local necesita una geometría activa suficientemente
-  regular; no se afirma convergencia global ni robustez ante toda degeneración.
-  `control=list(regularization=1e-10, fallback_osqp=TRUE)` permite respaldo
-  explícito con OSQP. Se conserva el estado del intento fallido en `$fallback`.
-  Un warm start dual requiere un fit compatible con multiplicadores.
-* **quadprog**: referencia densa, limitada a 2.000 unidades para proteger
-  memoria. Los controles redundantes se reducen antes del QP. `qp` conserva
-  su significado histórico; `quadprog` usa la nueva salida común.
+  Its gradient is `rhs-Bw`; a generalized Hessian is `B H_free B'`.
+  Complementarity requires `mu >= 0`, `b-Cw >= 0`, and `mu*(b-Cw) = 0`.
+  The algorithm dynamically identifies active multipliers, regularizes the
+  Hessian, projects multipliers, and uses Armijo line search. If the Newton
+  direction fails, it attempts projected gradient steps. Fast local
+  convergence requires a sufficiently regular active-set geometry; neither
+  global convergence nor robustness to every degeneracy is claimed.
+  `control=list(regularization=1e-10, fallback_osqp=TRUE)` explicitly
+  enables an OSQP fallback. The failed attempt's state is retained in
+  `$fallback`. A dual warm start requires a compatible fit with multipliers.
+* **quadprog**: dense reference solver, limited to 2,000 units to protect
+  memory. Redundant controls are reduced before the QP is solved. `qp`
+  retains its historical meaning; `quadprog` uses the new common output
+  format.
 
-La convexidad estricta (h>0) asegura pesos óptimos únicos cuando el conjunto
-es no vacío, aunque los multiplicadores no sean únicos. Las identidades de
-proyección y KKT concuerdan con el documento de fundamentos del proyecto.
-No se deduce infactibilidad del fracaso de una proyección o de Newton.
+Strict convexity (`h > 0`) guarantees unique optimal weights whenever the
+feasible set is nonempty, although multipliers need not be unique. The
+projection identities and KKT conditions agree with the project's
+mathematical foundations. Failure of a projection method or Newton iteration
+does not by itself establish infeasibility.
 
-### Selección automática y compatibilidad
+### Automatic selection and backward compatibility
 
-`calibrate_quadratic(..., solver="auto")` usa quadprog si n<=200, p<=20,
-la entrada es densa y su densidad supera .2. En otros casos usa OSQP si está
-instalado; si no, Dykstra. Nunca elige automáticamente Newton experimental.
-La razón y el método elegido aparecen en `$selection_reason` y `$solver`.
+`calibrate_quadratic(..., solver="auto")` uses quadprog when `n <= 200`,
+`p <= 20`, the input is dense, and its density exceeds 0.2. Otherwise it
+uses OSQP if installed, or Dykstra if OSQP is unavailable. Experimental
+Newton is never selected automatically. The rationale and selected solver
+are reported in `$selection_reason` and `$solver`.
 
-`calibrate_weights`/`calibrate` conservan las rutas históricas de `auto` para
-entradas densas de hasta 2.000 filas. Con entradas dispersas o más de 2.000
-filas, las distancias cuadráticas pasan a la nueva selección. Este cambio es
-explícito: esas rutas devuelven estados de no convergencia en vez de lanzar
-el error numérico de la implementación antigua. Para conservar exactamente
-la ruta antigua, elegir `dual`, `qp` o `projection` según corresponda.
-Raking/logit siguen informando que usan Newton amortiguado; no admiten los
-nuevos solvers cuadráticos.
+`calibrate_weights` and `calibrate` retain their historical `auto` routes for
+dense inputs with up to 2,000 rows. For sparse inputs or more than 2,000
+rows, quadratic distances switch to the new solver selection. This change
+is explicit: those routes return a nonconvergence status rather than the
+numerical error raised by the old implementation. To retain the exact
+legacy route, explicitly select `dual`, `qp`, or `projection`, as appropriate.
+Raking and logit still report the use of damped Newton and do not support
+the new quadratic solvers.
 
-### Diagnóstico y estados
+### Diagnostics and statuses
 
-Los nuevos resultados incluyen pesos, g, objetivo, iteraciones, tiempos,
-residuos, KKT, multiplicadores, problema disperso y datos del backend:
+New fit objects include weights, `g`, objective, iterations, timings,
+residuals, KKT diagnostics, multipliers, the sparse problem, and backend data:
 
-| Estado | Significado |
+| Status | Meaning |
 |---|---|
-| `optimal_numerical` | El método declara éxito y pasa la comprobación KKT a tol |
-| `approximate` | OSQP informa solved inaccurate, o un candidato no pasa KKT |
-| `not_converged` | Presupuesto agotado, estancamiento u otro fracaso sin certificado |
-| `infeasible_certified` | OSQP aporta certificado de Farkas verificado numéricamente a tol |
+| `optimal_numerical` | The solver reports success and passes the KKT check at `tol` |
+| `approximate` | OSQP reports `solved inaccurate`, or a candidate fails the KKT check |
+| `not_converged` | Iteration budget exhausted, stagnation, or another failure without a certificate |
+| `infeasible_certified` | OSQP supplies a Farkas certificate verified numerically at `tol` |
 
-El último es un **certificado numérico**, no una prueba con aritmética exacta.
-Se comprueban residuo de la ecuación de Farkas y soporte estrictamente negativo.
-Los estados de infactibilidad no contienen pesos utilizables. Dykstra y Newton
-no certifican infactibilidad. La función independiente
-`calibration_feasibility(..., direction=...)` conserva el LP para ese fin.
+The last status is a **numerical certificate**, not a proof using exact
+arithmetic. The Farkas equation residual and strictly negative support are
+checked. Infeasibility statuses contain no usable fitted weights. Neither
+Dykstra nor Newton certifies infeasibility. The independent function
+`calibration_feasibility(..., direction=...)` retains the LP for that purpose.
 
-Las igualdades y violaciones de controles se escalan por el máximo de 1 y sus
-extremos finitos; las cotas, por max(1,abs(w)); la estacionariedad por la escala
-del gradiente. La complementariedad se mide en unidades absolutas del
-objetivo. Esto puede ser exigente con escalas grandes; conviene reescalar
-controles mal condicionados y examinar los residuos. Un estado óptimo nunca
-se decide únicamente por estabilización de pesos.
+Equality and control-violation residuals are scaled by the maximum of 1 and
+the finite control endpoints; weight bounds by `max(1,abs(w))`; and
+stationarity by the gradient scale. Complementarity is measured in absolute
+objective units. This can be demanding at large scales: rescale poorly
+conditioned controls and inspect residuals. Optimal status is never based
+solely on the stabilization of weights.
 
-`lambda` conserva la convención histórica gradiente=X lambda más normales de
-cotas; `$duals$controls=-lambda` usa la convención estándar de OSQP.
-`calibration_diagnostics(fit)` muestra controles antes/después, violación,
-lambda, pesos iniciales/finales, cambios, g, cuantiles, duales de cotas y KKT.
-También funciona con los fits históricos producidos por esta versión. Para
-raking/logit no aplica un diagnóstico KKT cuadrático. En esos fits se conserva
-`status="optimal"` y se añade `$termination`, sin alterar los primeros campos.
+`lambda` retains the historical convention of `gradient = X lambda` plus
+bound normals; `$duals$controls = -lambda` uses the standard OSQP convention.
+`calibration_diagnostics(fit)` displays controls before and after fitting,
+violations, `lambda`, initial and final weights, changes, `g`, quantiles,
+bound duals, and KKT diagnostics. It also works with legacy fits produced by
+this version. Quadratic KKT diagnostics do not apply to raking or logit.
+For those fits, `status="optimal"` is retained and `$termination` is added
+without changing the initial output fields.
 
-### Instalación y dependencias
+### Installation and dependencies
 
-Matrix es dependencia obligatoria; osqp es opcional. Dykstra y Newton no
-requieren osqp. Solicitarlo explícitamente sin instalarlo da un error claro.
+Matrix is a required dependency; osqp is optional. Dykstra and Newton do
+not require osqp. Explicitly requesting OSQP when it is not installed
+produces an informative error.
 
 ```r
 install.packages(c("Matrix", "osqp", "quadprog", "lpSolve"))
 install.packages("CalTools_0.4.0.tar.gz", repos=NULL, type="source")
 ```
 
-### Benchmark reproducible
+### Reproducible benchmark
 
-Ejecutar `Rscript benchmarks/scalable.R` desde la raíz del proyecto instalado.
-La semilla es 20261021. Se evalúan n=1.000, 3.000, 10.000, 50.000 y 100.000,
-tres perfiles (6 controles/2 desigualdades/densidad 1; 16/6/.05; 16/6/.1 con
-cotas estrechas) y tres repeticiones. Hay tiempos de generación, preparación
-común + backend, resolución y total; objetivo, KKT, iteraciones, estados,
-cotas activas y memoria asignada por R. El total incluye validación.
+Run `Rscript benchmarks/scalable.R` from the project root. The random seed
+is 20261021. The benchmark evaluates n = 1,000, 3,000, 10,000, 50,000, and
+100,000 across three profiles (6 controls/2 inequalities/density 1;
+16/6/.05; and 16/6/.1 with tight bounds), with three repetitions. It records
+generation time, common preparation plus backend time, solve time, and total
+time, as well as objective, KKT diagnostics, iterations, statuses, active
+bounds, and R-allocated memory. Total time includes validation.
 
-La memoria registrada por `Rprofmem` es asignación acumulada de R, **no pico
-RSS**, y excluye asignaciones nativas internas de OSQP. Las mediciones incluyen
-el coste de instrumentación. Quadprog se omite deliberadamente para n>2.000.
-Los resultados son exploratorios en un único entorno, no garantizan un orden
-de rendimiento general ni sustituyen pruebas con datos reales.
+Memory recorded by `Rprofmem` is cumulative R allocation, **not peak RSS**,
+and excludes OSQP's internal native allocations. Measurements include
+instrumentation overhead. Quadprog is deliberately omitted for n > 2,000.
+The results are exploratory and reflect one environment; they do not
+establish a universal performance ranking or replace tests on real data.
 
-Resultados completos: `benchmarks/results.csv`; entorno y versiones:
-`benchmarks/sessionInfo.txt`. Las secciones siguientes conservan la guía y
-los ejemplos de funcionalidades de 0.3.0.
+Complete results: `benchmarks/results.csv`; environment and versions:
+`benchmarks/sessionInfo.txt`. The following sections retain the guide and
+examples for features introduced in 0.3.0.
 
-### Resultados medidos en este entorno
+### Results measured in this environment
 
-Medianas de tiempo total (segundos), tres repeticiones, perfil de 16 controles,
-6 desigualdades, densidad .1 y cotas estrechas. Tolerancia 1e-6 y máximo 1.000
-iteraciones por método. El asterisco indica una solución aproximada de OSQP,
-por lo que su tiempo no representa haber alcanzado la misma precisión.
+Median total times (seconds), three repetitions, for the profile with
+16 controls, 6 inequalities, density 0.1, and tight bounds. Tolerance
+was 1e-6, with a maximum of 1,000 iterations per method. An asterisk
+indicates an approximate OSQP solution; its time therefore does not
+represent achievement of the same precision.
 
 | n | OSQP | Dykstra | Newton dual |
 |---:|---:|---:|---:|
@@ -194,15 +208,17 @@ por lo que su tiempo no representa haber alcanzado la misma precisión.
 | 50000 | 1.806* | 0.236 | 0.098 |
 | 100000 | 4.395* | 0.444 | 0.226 |
 
-De 144 ejecuciones realizadas, 138 pasaron KKT y 6 quedaron como aproximadas;
-otras 36 combinaciones de quadprog se omitieron por el límite de tamaño.
-En el perfil estrecho, el máximo residuo KKT de OSQP fue 0.00539 para
-50.000 unidades y 0.00964 para 100.000. Los CSV conservan objetivos, memoria
-asignada por R, cotas activas y tiempos separados de todas las ejecuciones.
+Of 144 completed runs, 138 passed the KKT checks and 6 were classified as
+approximate; another 36 quadprog configurations were omitted because of
+the size limit. In the tight-bounds profile, OSQP's maximum KKT residual
+was 0.00539 for 50,000 units and 0.00964 for 100,000 units. The CSV files
+retain objectives, R-allocated memory, active bounds, and separate timing
+measurements for every run.
 
-Estas muestras favorecen estructuras con pocos controles y no demuestran
-superioridad universal. La validación de Newton sigue siendo limitada; faltan
-ensayos extensos con datos reales, conjuntos casi infactibles y escalas extremas.
+These instances favor structures with relatively few controls and do not
+demonstrate universal superiority. Validation of Newton remains limited;
+extensive tests with real data, nearly infeasible systems, and extreme
+scalings are still needed.
 
 ---
 
@@ -226,7 +242,7 @@ examples, mathematical notes, tests, benchmark CSVs and validation logs.
 
 ```r
 install.packages(c("lpSolve", "quadprog"))
-install.packages("CalTools_0.3.0.tar.gz", repos=NULL, type="source")
+install.packages("CalTools_0.4.0.tar.gz", repos=NULL, type="source")
 library(CalTools)
 ```
 
@@ -329,7 +345,7 @@ are not unique.
 
 Minimizing the Lagrangian over the box gives
 
-$$w(\lambda)=\operatorname{clip}_{[L,U]}(d+HA^T\lambda).$$
+$$w_i(\lambda)=\min\{U_i,\max\{L_i,d_i+h_i(X\lambda)_i\}\}.$$
 
 A root of `Aw(lambda)=t` is a global optimum. The implementation recomputes bound
 activity at every evaluation, so a coordinate may leave a bound. The derivative
@@ -532,7 +548,7 @@ If `S(v)=v't-sigma(v)>0`, no feasible weight vector exists. Taking
 strictly infeasible finite-box problems in exact arithmetic. For any box weight
 and nonzero direction,
 
-$$\max(0,S(v)/\|v\|)\le \operatorname{dist}(t,AB)\le\|Aw-t\|.$$
+$$\max(0,S(v)/\|v\|)\le \mathrm{dist}(t,AB)\le\|Aw-t\|.$$
 
 The implementation keeps the best lower and upper distance bounds. It scales
 controls by `max(1,abs(total))` before iterating; reported distances use those
@@ -701,7 +717,7 @@ roxygen2::roxygenise(".")
 testthat::test_local(".")
 # Shell, from the parent directory:
 # R CMD build CalTools
-# R CMD check --no-manual CalTools_0.3.0.tar.gz
+# R CMD check --no-manual CalTools_0.4.0.tar.gz
 ```
 
 The current mathematical core uses dense control matrices and SVD. Mixed QP
@@ -721,7 +737,7 @@ infeasible case and a difficult boundary-feasible case.
 The implementation follows Sections 4, 5, 8 and 9 of the supplied
 *Geometry, Algorithms, and Certificates for Advanced Survey Calibration*
 (20 October 2026), with an explicit correction to the universal face-fixing
-claims in *Herramientas avanzadas de calibrado en R*. The original notes and
+claims in *Advanced Calibration Tools in R* (translated title). The original notes and
 scripts are source material, not imported runtime code.
 
 - Deville and Särndal (1992), *Calibration estimators in survey sampling*,
@@ -770,7 +786,7 @@ explicit margin aggregation.
 - [Reproducible random calibration stress tests](#reproducible-random-calibration-stress-tests)
 - [11. Reproducibility and limits](#11-reproducibility-and-limits)
 
-CalTools 0.3.0 provides bounded calibration, explicit inconsistency
+The 0.3.0 feature set, retained in CalTools 0.4.0, provides bounded calibration, explicit inconsistency
 diagnostics, feasibility checks, directional bound relaxation and
 auditable margin aggregation. All public identifiers, examples,
 messages, code comments and documentation are in English. **Version
@@ -785,7 +801,7 @@ R \>= 4.1.0 is required. Runtime dependencies are `lpSolve` and
 
 ``` r
 install.packages(c("lpSolve", "quadprog"))
-install.packages("CalTools_0.3.0.tar.gz", repos = NULL, type = "source")
+install.packages("CalTools_0.4.0.tar.gz", repos = NULL, type = "source")
 library(CalTools)
 ?calibrate_weights
 ?analyze_inconsistency
@@ -872,7 +888,7 @@ Negative totals do **not** require negative initial weights. For
 example, an auxiliary variable can take negative values while all survey
 weights are positive. The residual check is
 
-$$\max_j\frac{|(X^\top w-t)_j|}{\max(1,|t_j|)}\le\texttt{tol}.$$
+$$\max_j\frac{|(X^\top w-t)_j|}{\max(1,|t_j|)}\le\mathrm{tol}.$$
 
 It uses the absolute magnitude of each total and remains defined at
 zero.
@@ -1243,7 +1259,7 @@ testthat::test_local("CalTools")
 rmarkdown::render("CalTools/README.Rmd")
 # In a terminal:
 # R CMD build CalTools
-# R CMD check --no-manual CalTools_0.3.0.tar.gz
+# R CMD check --no-manual CalTools_0.4.0.tar.gz
 ```
 
 The numerical core is dense. Initial reduction costs about $O(np^2)$ for
