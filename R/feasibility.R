@@ -1,27 +1,36 @@
 #' Check feasibility of calibration equations and finite vector bounds
 #' @inheritParams calibrate_weights
-#' @param method auto uses the low-dimensional quadratic dual then LP;
+#' @param method auto/pfc use fixing as a witness warm start followed by
+#'   accelerated projected residual minimization and separation certificates.
+#'   fixing alone is a witness heuristic, optionally followed by LP;
 #'   projection uses alternating affine/box projections; lp uses LP directly.
-#' @param fallback If projection exhausts max_iter, use LP when TRUE; otherwise
+#' @param fallback If an iterative method exhausts max_iter, use LP when TRUE; otherwise
 #'   return feasible=NA and status="iteration_limit".
 #' @return A list with feasible (TRUE, FALSE, or NA for solver failure), status,
 #'   witness weights, residual, and solver. FALSE is reported only from a checked
 #'   separating certificate or LP infeasibility, never an iteration limit.
-#' @details The LP uses w=L+z with z>=0 and sparse constraint triplets. The
+#' @details Equality feasibility requires finite bounds. Mixed constraints use
+#'   only LP (auto is an alias), and allow infinite bounds through variable
+#'   splitting. The finite-lower-bound LP uses w=L+z with z>=0 and sparse constraint triplets. The
 #'   equations are scaled by max(1,abs(totals)); the tolerance does not reverse
-#'   inequalities for negative totals. All bounds must be finite here.
+#'   inequalities for negative totals.
 #' @export
 #' @examples
 #' X <- cbind(N = rep(1, 3), x = -1:1)
 #' calibration_feasibility(X, c(N = 3, x = 0), 0, 2)
 #' calibration_feasibility(X, c(N = 9, x = 0), 0, 2)
 calibration_feasibility <- function(X, totals, lower, upper,
-  tol = 1e-8, method = c("auto", "projection", "lp"), max_iter = 500L, fallback = TRUE, rank_tol = 1e-10) {
+  tol = 1e-8, method = c("auto", "pfc", "fixing", "projection", "lp"), max_iter = 500L, fallback = TRUE, rank_tol = 1e-10, direction = "=") {
   method <- match.arg(method)
   .ct_scalar(rank_tol, "rank_tol")
   dat <- .ct_data(X, totals); X <- dat$X; totals <- dat$totals
   .ct_scalar(tol, "tol"); .ct_scalar(max_iter, "max_iter", integer = TRUE)
   n <- nrow(X); p <- ncol(X)
+  direction <- .ct_direction(direction, p)
+  if (any(direction != "=")) {
+    if (!method %in% c("auto", "lp")) stop("Mixed feasibility uses method='lp' only (auto is an alias)")
+    return(.ct_mixed_feasibility(X, totals, lower, upper, direction, tol))
+  }
   bu <- .ct_bounds(lower, upper, n); L <- bu$L; U <- bu$U
   if (any(!is.finite(L)) || any(!is.finite(U))) stop("Feasibility requires finite bounds")
   finish <- function(feasible, status, w = NULL, solver, certificate = NULL) {
@@ -45,13 +54,23 @@ calibration_feasibility <- function(X, totals, lower, upper,
   bad <- which(tn < lower - tol | tn > upper + tol)
   if (length(bad)) return(finish(FALSE, "infeasible", solver = "box-certificate",
     certificate = list(columns = bad, min = lower[bad], max = upper[bad], target = tn[bad])))
-  if (method == "auto") {
-    red <- reduction
-    if (red$consistent) {
-      ans <- .ct_dual(red$A, red$b, center, rep(1, n), "truncated", L, U,
-                      tol * 0.1, max_iter)
-      if (all(is.finite(ans$w)) && .ct_error(X, ans$w, totals) <= tol)
-        return(finish(TRUE, "feasible", ans$w, "dual-witness"))
+  attempt <- NULL
+  if (method %in% c("auto", "pfc", "fixing")) {
+    # Fixing is only a witness heuristic; its failure never certifies emptiness.
+    a <- .ct_fixing(reduction$A, reduction$b, center, rep(1,n), L,U,tol*.1,min(n+1L,max_iter))
+    if (.ct_error(X,a$w,totals)<=tol) {
+      out <- finish(TRUE,"feasible",a$w,"fixing-witness")
+      out$iterations <- a$iterations
+      return(out)
+    }
+    if (method != "fixing") {
+      attempt <- .ct_pfc(X,totals,L,U,tol,max_iter)
+      attempt$warm_start_iterations <- a$iterations
+      if (!is.na(attempt$feasible) || !fallback) return(attempt)
+    } else {
+      attempt <- finish(NA,"undetermined",a$w,"fixing")
+      attempt$iterations <- a$iterations
+      if (!fallback) return(attempt)
     }
   }
   if (method == "projection") {
@@ -86,7 +105,9 @@ calibration_feasibility <- function(X, totals, lower, upper,
   good <- .ct_error(X, w, totals) <= tol &&
     all(w >= L - tol * pmax(1, abs(L))) && all(w <= U + tol * pmax(1, abs(U)))
   if (!good) return(finish(NA, "numerical_failure", w, "lp"))
-  finish(TRUE, "feasible", w, "lp")
+  out <- finish(TRUE, "feasible", w, "lp")
+  if (!is.null(attempt)) out$attempt <- attempt
+  out
 }
 
 .ct_feasible_bool <- function(z) {
@@ -97,10 +118,10 @@ calibration_feasibility <- function(X, totals, lower, upper,
 #' @inheritParams calibration_feasibility
 #' @param tol Calibration tolerance (absolute for totals of magnitude <=1).
 #' @return Logical feasibility; numerical uncertainty raises an error.
-#' @details The permanent-clipping rule and dense dual Farkas LP from the
-#'   prototype are not used. Fast and regular wrappers share the same validated
-#'   low-dimensional solver; use method='projection' in calibration_feasibility
-#'   to request ordinary alternating projections.
+#' @details The dense dual Farkas LP is replaced by a shifted primal LP.
+#'   Fast and regular wrappers use the PFC hybrid; permanent fixing is used
+#'   only to find checked witnesses, never to reject feasibility.
+#'   Use method='projection' for ordinary alternating projections.
 #' @export
 #' @examples
 #' X <- matrix(-1, 3, 1)

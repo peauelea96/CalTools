@@ -26,6 +26,9 @@
 #' @param bounds Initial lower and upper common endpoints.
 #' @param search_limits Outermost endpoint(s), scalar for upper/lower, pair for both.
 #' @param step Positive grid spacing; the final endpoint is always included.
+#' @param feasibility_method Feasibility backend passed to calibration_feasibility.
+#' @param feasibility_max_iter Iteration budget for feasibility.
+#' @param feasibility_fallback Allow LP after an inconclusive iterative check.
 #' @return bounds, status (0 found, 1 exhausted), vector bounds and witness when
 #'   successful. For both, searches a simultaneous expanding path, not all pairs.
 #' @export
@@ -35,14 +38,16 @@
 #'   search_limits = 4, step = 0.25)
 analyze_feasibility_bounds <- function(X, totals, d, tol = 1e-6,
   type = c("g-weight", "w-weight"), method = c("upper", "lower", "both"),
-  bounds, search_limits, step) {
+  bounds, search_limits, step, feasibility_method = "auto",
+  feasibility_max_iter = 500L, feasibility_fallback = TRUE) {
   type <- match.arg(type); method <- match.arg(method)
   dat <- .ct_data(X, totals); d <- .ct_vec(d, nrow(dat$X), "d", scalar = FALSE)
   grid <- .ct_grid(bounds, search_limits, step, method)
   # Feasibility is monotone along this nested path: binary search grid index.
   check <- function(k) {
     bu <- .ct_gbounds(d, grid[k, ], type)
-    f <- calibration_feasibility(dat$X, dat$totals, bu$L, bu$U, tol)
+    f <- calibration_feasibility(dat$X, dat$totals, bu$L, bu$U, tol, method=feasibility_method,
+      max_iter=feasibility_max_iter, fallback=feasibility_fallback)
     list(ok = .ct_feasible_bool(f), bounds = grid[k, ], lower = bu$L,
          upper = bu$U, weights = f$weights)
   }
@@ -73,15 +78,18 @@ analyze_feasibility_bounds <- function(X, totals, d, tol = 1e-6,
 check_modified_feasibility <- function(X, totals, d, lower, upper, margin_names,
   action = c("suppress", "join"), merged_name = NULL, tol = 1e-6,
   type = c("g-weight", "w-weight"), method = c("upper", "lower", "both"),
-  bounds, search_limits, step) {
+  bounds, search_limits, step, feasibility_method = "auto",
+  feasibility_max_iter = 500L, feasibility_fallback = TRUE) {
   action <- match.arg(action); type <- match.arg(type); method <- match.arg(method)
   if (action == "suppress" && !is.null(merged_name)) stop("merged_name only applies to joins")
   z <- if (action == "suppress") drop_margins(X, totals, margin_names) else
     merge_margins(X, totals, margin_names, merged_name)
-  first <- calibration_feasibility(z$X, z$totals, lower, upper, tol)
+  first <- calibration_feasibility(z$X, z$totals, lower, upper, tol, method=feasibility_method,
+      max_iter=feasibility_max_iter, fallback=feasibility_fallback)
   if (.ct_feasible_bool(first)) return(c(z, list(bounds = bounds, status = 0L,
     lower = rep_len(lower, nrow(z$X)), upper = rep_len(upper, nrow(z$X)), weights = first$weights)))
-  out <- analyze_feasibility_bounds(z$X, z$totals, d, tol, type, method, bounds, search_limits, step)
+  out <- analyze_feasibility_bounds(z$X, z$totals, d, tol, type, method, bounds, search_limits, step,
+      feasibility_method, feasibility_max_iter, feasibility_fallback)
   c(z, out)
 }
 
@@ -101,7 +109,8 @@ check_modified_feasibility <- function(X, totals, d, lower, upper, margin_names,
 check_sequential_feasibility <- function(X, totals, d, lower, upper,
   margin_names_list, actions, merged_names = rep(list(NULL), length(margin_names_list)), tol = 1e-6,
   type = c("g-weight", "w-weight"), method = c("upper", "lower", "both"),
-  bounds, search_limits, step) {
+  bounds, search_limits, step, feasibility_method = "auto",
+  feasibility_max_iter = 500L, feasibility_fallback = TRUE) {
   type <- match.arg(type); method <- match.arg(method)
   if (!is.list(margin_names_list) || length(actions) != length(margin_names_list) ||
       length(merged_names) != length(margin_names_list)) stop("Action lists must have equal lengths")
@@ -109,7 +118,8 @@ check_sequential_feasibility <- function(X, totals, d, lower, upper,
   history <- list()
   for (i in seq_along(margin_names_list)) {
     z <- check_modified_feasibility(z$X, z$totals, d, lower, upper, margin_names_list[[i]],
-      actions[i], merged_names[[i]], tol, type, method, bounds, search_limits, step)
+      actions[i], merged_names[[i]], tol, type, method, bounds, search_limits, step,
+      feasibility_method, feasibility_max_iter, feasibility_fallback)
     history[[i]] <- list(action = actions[i], variables = margin_names_list[[i]])
     z$iter <- i
     if (z$status == 0L) break
@@ -189,6 +199,8 @@ recommend_margin_merges <- function(X, d, totals, q = 1, margin_groups, ordered,
 #' @param max_solutions Maximum number of candidate solutions.
 #' @param max_depth Maximum number of successive pair merges.
 #' @param max_nodes Maximum evaluated nodes, guarding combinatorial growth.
+#' @param solver Calibration solver passed to calibrate_weights.
+#' @param projection_action Action on an uncertified projection; defaults to refine in workflows.
 #' @param on_inconsistency How to handle incompatible totals: stop returns an
 #'   empty search with a diagnostic; merge explicitly allows searching problems
 #'   with weakened constraints after permitted aggregations.
@@ -209,7 +221,9 @@ automatic_calibration <- function(X, totals, d, q = 1, lower, upper,
   search_limits = c(0.1, 15), step = 1, margin_groups = list(),
   ordered = rep(FALSE, length(margin_groups)), tol = 1e-6,
   max_solutions = 3L, max_depth = 2L, type = c("g-weight", "w-weight"),
-  metric_scale = NULL, max_nodes = 1000L, on_inconsistency = c("stop", "merge")) {
+  metric_scale = NULL, max_nodes = 1000L, on_inconsistency = c("stop", "merge"),
+  feasibility_method = "auto", feasibility_max_iter = 500L,
+  feasibility_fallback = TRUE, solver = "auto", projection_action = "refine") {
   method <- match.arg(method); type <- match.arg(type)
   dat <- .ct_named(X, totals); X <- dat$X; totals <- dat$totals
   .ct_families(margin_groups, ordered, colnames(X))
@@ -220,7 +234,9 @@ automatic_calibration <- function(X, totals, d, q = 1, lower, upper,
   d <- .ct_vec(d, nrow(X), "d", scalar = FALSE)
   .ct_metric(d, .ct_vec(q, length(d), "q"), metric_scale)
   on_inconsistency <- match.arg(on_inconsistency)
-  initial_check <- calibration_preflight(X, totals, lower, upper, tol)
+  initial_check <- calibration_preflight(X, totals, lower, upper, tol,
+    feasibility_method=feasibility_method, feasibility_max_iter=feasibility_max_iter,
+    feasibility_fallback=feasibility_fallback)
   if ((initial_check$status == "inconsistent_totals" && on_inconsistency == "stop") ||
       initial_check$status == "numerical_failure") {
     return(structure(list(), class = c("caltools_search", "list"),
@@ -241,17 +257,19 @@ automatic_calibration <- function(X, totals, d, q = 1, lower, upper,
     bu <- NULL
     if (!incompatible) {
       f <- if (!length(node$history)) initial_check$feasibility else
-        calibration_feasibility(node$X, node$totals, lower, upper, tol)
+        calibration_feasibility(node$X, node$totals, lower, upper, tol, method=feasibility_method,
+      max_iter=feasibility_max_iter, fallback=feasibility_fallback)
       bu <- list(lower = lower, upper = upper)
     }
     if (!incompatible && !.ct_feasible_bool(f)) {
       found <- analyze_feasibility_bounds(node$X, node$totals, d, tol, type,
-        method, bounds, search_limits, step)
+        method, bounds, search_limits, step,
+      feasibility_method, feasibility_max_iter, feasibility_fallback)
       if (found$status == 0L) bu <- found else bu <- NULL
     }
     if (!is.null(bu)) {
       fit <- calibrate_weights(node$X, d, node$totals, q, "truncated", bu$lower,
-        bu$upper, metric_scale = metric_scale, tol = tol)
+        bu$upper, metric_scale = metric_scale, tol = tol, solver=solver, projection_action=projection_action)
       solutions[[length(solutions) + 1L]] <- list(fit = fit, weights = fit$weights,
         g = fit$g, X = node$X, totals = node$totals,
         lower = fit$lower, upper = fit$upper, history = node$history,

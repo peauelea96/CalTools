@@ -52,6 +52,7 @@
 }
 .ct_pinv <- function(A, b, tol = 1e-12) {
   if (!ncol(A)) return(numeric())
+  if (!nrow(A)) return(rep(0, ncol(A)))
   ss <- svd(A)
   keep <- ss$d > tol * max(ss$d, 0)
   if (!any(keep)) return(rep(0, ncol(A)))
@@ -159,6 +160,10 @@
   C <- cbind(A, I[, il, drop = FALSE], -I[, iu, drop = FALSE])
   z <- quadprog::solve.QP(diag(1 / v, n), d / v, C,
                           c(b, L[il], -U[iu]), meq = ncol(A))
-  list(w = z$solution, lambda = z$Lagrangian[seq_len(ncol(A))],
+  ne <- ncol(A)
+  jj <- if(ne<ncol(C)) seq.int(ne+1L,ncol(C)) else integer()
+  rest <- if(length(jj)) as.numeric(C[,jj,drop=FALSE]%*%z$Lagrangian[jj]) else rep(0,n)
+  la <- .ct_pinv(A,(z$solution-d)/v-rest)
+  list(w = z$solution, lambda = la,
        iterations = z$iterations[1L], converged = TRUE)
 }

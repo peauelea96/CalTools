@@ -28,10 +28,10 @@ Logical feasibility; numerical uncertainty raises an error.
 Boolean feasibility interfaces
 }
 \details{
-The permanent-clipping rule and dense dual Farkas LP from the
-  prototype are not used. Fast and regular wrappers share the same validated
-  low-dimensional solver; use method='projection' in calibration_feasibility
-  to request ordinary alternating projections.
+The dense dual Farkas LP is replaced by a shifted primal LP.
+  Fast and regular wrappers use the PFC hybrid; permanent fixing is used
+  only to find checked witnesses, never to reject feasibility.
+  Use method='projection' for ordinary alternating projections.
 }
 \examples{
 X <- matrix(-1, 3, 1)

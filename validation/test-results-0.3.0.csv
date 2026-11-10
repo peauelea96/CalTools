@@ -1,0 +1,42 @@
+"file","context","test","nb","failed","skipped","error","warning","user","system","real","passed"
+"test-advanced.R","","projection counterexample is feasible but never labelled optimal",9,0,FALSE,FALSE,0,0.287,0,0.287,9
+"test-advanced.R","","wrong faces never establish infeasibility",7,0,FALSE,FALSE,0,0.194,0.001,0.194,7
+"test-advanced.R","","PFC produces an independently checked separation certificate",5,0,FALSE,FALSE,0,0.012,0,0.0129999999999999,5
+"test-advanced.R","","certificates allow fixed coordinates and nonunique multipliers",4,0,FALSE,FALSE,0,0.0129999999999999,0,0.0140000000000002,4
+"test-advanced.R","","mixed constraints use one QP and enforce inequalities independently",9,0,FALSE,FALSE,0,0.085,0,0.0859999999999999,9
+"test-advanced.R","","mixed QP handles redundant equalities, signed weights and zero constraints",6,0,FALSE,FALSE,0,0.0880000000000001,0,0.0880000000000001,6
+"test-advanced.R","","nonlinear solver selection is explicit and truthful",4,0,FALSE,FALSE,0,0.044,0,0.044,4
+"test-advanced.R","","chosen feasibility backend reaches all workflow stages",9,0,FALSE,FALSE,0,0.196,0,0.195,9
+"test-advanced.R","","random feasible problems agree with independent QP solutions",60,0,FALSE,FALSE,0,0.324,0.002,0.325,60
+"test-calibration.R","","linear calibration agrees with the analytic formula and sampling",2,0,FALSE,FALSE,0,0.0089999999999999,0,0.00999999999999979,2
+"test-calibration.R","","signed and zero weights require a positive explicit metric",6,0,FALSE,FALSE,0,0.0329999999999999,0,0.0319999999999996,6
+"test-calibration.R","","permanent clipping counterexample is feasible and solved correctly",4,0,FALSE,FALSE,0,0.02,0,0.02,4
+"test-calibration.R","","random dual solutions agree with independent reference QP and KKT",105,0,FALSE,FALSE,0,0.414,0.004,0.417,105
+"test-calibration.R","","redundant constraints, zero totals and negative totals are handled",6,0,FALSE,FALSE,0,0.028,0,0.028,6
+"test-calibration.R","","nonlinear calibration uses correct derivatives with varying q",4,0,FALSE,FALSE,0,0.0140000000000002,0,0.0149999999999997,4
+"test-calibration.R","","distance functions include endpoint limits and correct raking name",5,0,FALSE,FALSE,0,0.02,0,0.02,5
+"test-calibration.R","","input and nonconvergence checks never return uncalibrated success",5,0,FALSE,FALSE,0,0.0810000000000004,0,0.0810000000000004,5
+"test-diagnostics.R","","incompatibilities carry checkable null-space relations",10,0,FALSE,FALSE,0,0.0289999999999999,0,0.0289999999999999,10
+"test-diagnostics.R","","diagnostics handle zero columns, no columns, and full rank",9,0,FALSE,FALSE,0,0.036,0,0.036,9
+"test-diagnostics.R","","diagnostic rank and target tolerances have separate roles",5,0,FALSE,FALSE,0,0.02,0,0.0189999999999997,5
+"test-diagnostics.R","","preflight distinguishes algebraic and bounded infeasibility",4,0,FALSE,FALSE,0,0.016,0,0.0169999999999999,4
+"test-diagnostics.R","","workflows stop on conflicting totals unless merging is explicit",10,0,FALSE,FALSE,0,0.0340000000000003,0,0.0350000000000001,10
+"test-diagnostics.R","","alternating projections return witnesses or an inconclusive status",7,0,FALSE,FALSE,0,0.024,0,0.024,7
+"test-generation-and-projection.R","","Euclidean closest consistent totals have the exact analytic solution",12,0,FALSE,FALSE,0,0.0510000000000002,0,0.0510000000000002,12
+"test-generation-and-projection.R","","Scales change the geometry, without changing algebraic consistency",5,0,FALSE,FALSE,0,0.0270000000000001,0,0.0270000000000001,5
+"test-generation-and-projection.R","","Projection handles full rank, zero columns and no columns",5,0,FALSE,FALSE,0,0.0150000000000001,0,0.0150000000000001,5
+"test-generation-and-projection.R","","Generator shapes, aliases, reproducibility and RNG isolation work",19,0,FALSE,FALSE,0,0.0740000000000003,0,0.0739999999999998,19
+"test-generation-and-projection.R","","Difficulty controls a provable initial bound obstruction",12,0,FALSE,FALSE,0,0.0470000000000002,0,0.0470000000000002,12
+"test-generation-and-projection.R","","Generator can force inconsistent linear or empty margins",12,0,FALSE,FALSE,0,0.0460000000000003,0.004,0.0499999999999998,12
+"test-generation-and-projection.R","","Generated benchmark inputs are accepted by automatic_calibration",2,0,FALSE,FALSE,0,0.0130000000000003,0,0.0119999999999996,2
+"test-negative-totals.R","","negative totals work with positive starting and final weights",13,0,FALSE,FALSE,0,0.0369999999999999,0,0.0369999999999999,13
+"test-negative-totals.R","","all-negative targets do not cause false convergence",8,0,FALSE,FALSE,0,0.0840000000000001,0,0.0839999999999996,8
+"test-tools.R","","LP feasibility supports signed bounds and zero/negative totals",11,0,FALSE,FALSE,0,0.0460000000000003,0,0.0469999999999997,11
+"test-tools.R","","random constructed feasible LPs return verified witnesses",40,0,FALSE,FALSE,0,0.109,0,0.108,40
+"test-tools.R","","minimal directional relaxation has an analytic value",5,0,FALSE,FALSE,0,0.0609999999999999,0,0.0609999999999999,5
+"test-tools.R","","bound grids distinguish absolute and multiplicative endpoints",4,0,FALSE,FALSE,0,0.0169999999999995,0,0.0169999999999995,4
+"test-tools.R","","diagnostics and aggregation preserve dimensions and names",12,0,FALSE,FALSE,0,0.0440000000000005,0,0.0440000000000005,12
+"test-tools.R","","BFS reaches depth two and keeps every original residual",6,0,FALSE,FALSE,0,0.0540000000000003,0,0.0540000000000003,6
+"test-tools.R","","recommendations never join a variable to itself on tied scores",2,0,FALSE,FALSE,0,0.032,0,0.0309999999999997,2
+"test-tools.R","","ordered actions use supplied bounds and empty lists are defined",4,0,FALSE,FALSE,0,0.0430000000000001,0,0.0430000000000001,4
+"test-tools.R","","inclusion probability generator terminates at both endpoints",11,0,FALSE,FALSE,0,0.0469999999999997,0,0.0460000000000003,11

@@ -10,10 +10,11 @@ calibration_feasibility(
   lower,
   upper,
   tol = 1e-08,
-  method = c("auto", "projection", "lp"),
+  method = c("auto", "pfc", "fixing", "projection", "lp"),
   max_iter = 500L,
   fallback = TRUE,
-  rank_tol = 1e-10
+  rank_tol = 1e-10,
+  direction = "="
 )
 }
 \arguments{
@@ -25,15 +26,20 @@ calibration_feasibility(
 
 \item{tol}{Relative/absolute calibration tolerance using max(1,abs(totals)).}
 
-\item{method}{auto uses the low-dimensional quadratic dual then LP;
+\item{method}{auto/pfc use fixing as a witness warm start followed by
+accelerated projected residual minimization and separation certificates.
+fixing alone is a witness heuristic, optionally followed by LP;
 projection uses alternating affine/box projections; lp uses LP directly.}
 
 \item{max_iter}{Iteration budget for each dual optimization phase.}
 
-\item{fallback}{If projection exhausts max_iter, use LP when TRUE; otherwise
+\item{fallback}{If an iterative method exhausts max_iter, use LP when TRUE; otherwise
 return feasible=NA and status="iteration_limit".}
 
 \item{rank_tol}{Relative SVD rank tolerance after column scaling.}
+
+\item{direction}{Scalar or per-column vector of '=', '<=', '>='.
+Inequalities support quadratic distances; select a quadratic solver.}
 }
 \value{
 A list with feasible (TRUE, FALSE, or NA for solver failure), status,
@@ -44,9 +50,11 @@ A list with feasible (TRUE, FALSE, or NA for solver failure), status,
 Check feasibility of calibration equations and finite vector bounds
 }
 \details{
-The LP uses w=L+z with z>=0 and sparse constraint triplets. The
+Equality feasibility requires finite bounds. Mixed constraints use
+  only LP (auto is an alias), and allow infinite bounds through variable
+  splitting. The finite-lower-bound LP uses w=L+z with z>=0 and sparse constraint triplets. The
   equations are scaled by max(1,abs(totals)); the tolerance does not reverse
-  inequalities for negative totals. All bounds must be finite here.
+  inequalities for negative totals.
 }
 \examples{
 X <- cbind(N = rep(1, 3), x = -1:1)

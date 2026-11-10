@@ -18,7 +18,10 @@ check_sequential_feasibility(
   method = c("upper", "lower", "both"),
   bounds,
   search_limits,
-  step
+  step,
+  feasibility_method = "auto",
+  feasibility_max_iter = 500L,
+  feasibility_fallback = TRUE
 )
 }
 \arguments{
@@ -47,6 +50,12 @@ check_sequential_feasibility(
 \item{search_limits}{Outermost endpoint(s), scalar for upper/lower, pair for both.}
 
 \item{step}{Positive grid spacing; the final endpoint is always included.}
+
+\item{feasibility_method}{Feasibility backend passed to calibration_feasibility.}
+
+\item{feasibility_max_iter}{Iteration budget for feasibility.}
+
+\item{feasibility_fallback}{Allow LP after an inconclusive iterative check.}
 }
 \value{
 First feasible modified problem, with iter and action history; if

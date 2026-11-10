@@ -1,5 +1,6 @@
 #' Diagnose a calibration problem before searching or fitting
 #' @inheritParams calibrate_weights
+#' @inheritParams analyze_feasibility_bounds
 #' @return A caltools_preflight list with status, consistency, feasibility and
 #'   zero_sample. Status distinguishes inconsistent_totals (no weight vector can
 #'   satisfy the equalities), bound_infeasible (equalities are consistent but the
@@ -14,7 +15,8 @@
 #' calibration_preflight(X, c(A = 4, B = 6, N = 10), 0, 3)
 #' calibration_preflight(X, c(A = 4, B = 6, N = 10), 0, 10)
 calibration_preflight <- function(X, totals, lower, upper, tol = 1e-8,
-                                   rank_tol = 1e-10) {
+                                   rank_tol = 1e-10, feasibility_method = "auto",
+  feasibility_max_iter = 500L, feasibility_fallback = TRUE) {
   data <- .ct_data(X, totals)
   bounds <- .ct_bounds(lower, upper, nrow(data$X))
   if (any(!is.finite(c(bounds$L, bounds$U)))) stop("Preflight requires finite bounds")
@@ -27,7 +29,8 @@ calibration_preflight <- function(X, totals, lower, upper, tol = 1e-8,
     status <- "inconsistent_totals"
   } else {
     feasibility <- calibration_feasibility(data$X, data$totals,
-                                            bounds$L, bounds$U, tol, rank_tol = rank_tol)
+                                            bounds$L, bounds$U, tol, rank_tol = rank_tol,
+      method=feasibility_method, max_iter=feasibility_max_iter, fallback=feasibility_fallback)
     status <- if (is.na(feasibility$feasible)) "numerical_failure" else
       if (feasibility$feasible) "feasible" else "bound_infeasible"
   }

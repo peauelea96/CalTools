@@ -1,0 +1,94 @@
+[1] 1 3
+[1] "qp"
+[1] TRUE
+      [,1]
+N        4
+cap      1
+floor    3
+raking: using damped Newton-Raphson (BFGS safeguard if needed)
+logit: using damped Newton-Raphson (BFGS safeguard if needed)
+Warning message:
+Feasible projection; optimality not certified. Inspect $certificate or use projection_action='refine' 
+[1] 0.00000000 0.33333333 0.06666667 0.73333333 0.00000000
+[1] "feasible_uncertified"
+[1] 1.693333
+[1] 0.02857143 0.36190476 0.03809524 0.67619048 0.00000000
+[1] 1.690476
+$optimal
+[1] FALSE
+
+$primal_feasible
+[1] TRUE
+
+$max_scaled_primal_violation
+[1] 4.440892e-16
+
+$max_scaled_stationarity
+[1] 0.2
+
+$multiplier_sign_error
+[1] 0
+
+$complementarity
+[1] 0
+
+$lambda
+[1] -0.2666667 -0.6666667
+
+$objective
+[1] 1.693333
+
+$dual_value
+[1] 1.673333
+
+$duality_gap
+[1] 0.02
+
+$kkt_objective_bound
+[1] 0.02
+
+$weighted_weight_error_bound
+[1] 0.2
+
+$bounds_require_exact_feasibility
+[1] TRUE
+
+$recovery
+[1] "lp_status_2"
+
+$tolerance
+[1] 1e-08
+
+$optimal
+[1] FALSE
+
+$primal_feasible
+[1] TRUE
+
+$max_scaled_stationarity
+[1] 0.2
+
+$duality_gap
+[1] 0.02
+
+$kkt_objective_bound
+[1] 0.02
+
+[1] TRUE
+[1] 0 4
+[1] FALSE
+[1] NA
+[1] TRUE
+[1] 0.2897841
+$distance_lower
+[1] 0.2897841
+
+$distance_upper
+[1] 0.6438295
+
+$iterations
+[1] 1
+
+$status
+[1] "infeasible_certified"
+

@@ -59,7 +59,7 @@ closest_consistent_totals <- function(X, totals, scales = 1,
   }
   labels <- colnames(X)
   if (is.null(labels)) labels <- names(totals)
-  if (is.null(labels)) labels <- paste0("margin_", seq_len(p))
+  if (is.null(labels)) labels <- if(p) paste0("margin_", seq_len(p)) else character()
   adjusted <- setNames(adjusted, labels)
   if (!details) return(adjusted)
   original <- setNames(as.numeric(totals), labels)

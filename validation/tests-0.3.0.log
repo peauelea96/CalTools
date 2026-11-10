@@ -1,0 +1,14 @@
+ℹ Loading CalTools
+Writing 'calibration_feasibility.Rd'
+Writing 'is_feasible_lp.Rd'
+Writing 'automatic_calibration.Rd'
+raking: using damped Newton-Raphson (BFGS safeguard if needed)
+raking: using damped Newton-Raphson (BFGS safeguard if needed)
+logit: using damped Newton-Raphson (BFGS safeguard if needed)
+raking: using damped Newton-Raphson (BFGS safeguard if needed)
+raking: using damped Newton-Raphson (BFGS safeguard if needed)
+raking: using damped Newton-Raphson (BFGS safeguard if needed)
+logit: using damped Newton-Raphson (BFGS safeguard if needed)
+logit: using damped Newton-Raphson (BFGS safeguard if needed)
+ failed  passed warning skipped 
+      0     478       0       0 

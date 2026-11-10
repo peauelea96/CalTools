@@ -10,8 +10,15 @@
 #' @param lower,upper Scalar or vector bounds on final weights.
 #' @param metric_scale Positive quadratic scale. Default is d, requiring d>0.
 #'   For signed or zero d specify a positive scale explicitly.
-#' @param solver Quadratic solver: auto tries the low-dimensional dual then a
-#'   dense QP fallback (at most 2000 observations); qp forces the reference QP.
+#' @param direction Scalar or per-column vector of '=', '<=', '>='.
+#'   Inequalities support quadratic distances; select a quadratic solver.
+#' @param projection_action report returns a feasible projection with its
+#'   certificate, refine solves again if not certified, error requires certification.
+#' @param solver Legacy dual, qp, projection, newton; new quadratic choices
+#'   quadprog, osqp, dykstra, dual_newton. auto preserves historical routes
+#'   for small dense inputs and calls calibrate_quadratic for sparse inputs
+#'   or more than 2000 rows. See calibrate_quadratic for details.
+#' @param control,warm_start,total_lower,total_upper See [calibrate_quadratic()].
 #' @param tol Relative/absolute calibration tolerance using max(1,abs(totals)).
 #' @param rank_tol Relative SVD rank tolerance after column scaling.
 #' @param max_iter Iteration budget for each dual optimization phase.
@@ -33,9 +40,45 @@
 calibrate_weights <- function(X, d, totals, q = 1,
   method = c("linear", "truncated", "raking", "logit"),
   lower = NULL, upper = NULL, metric_scale = NULL,
-  solver = c("auto", "dual", "qp"), tol = 1e-8, rank_tol = 1e-10,
-  max_iter = 500L) {
+  solver = c("auto", "dual", "qp", "projection", "newton", "osqp", "dykstra", "dual_newton", "quadprog"), tol = 1e-8, rank_tol = 1e-10,
+  max_iter = 500L, direction = "=", projection_action = c("report", "refine", "error"),
+  control = list(), warm_start = NULL, total_lower = NULL, total_upper = NULL) {
+  started <- proc.time()[[3L]]
   method <- match.arg(method); solver <- match.arg(solver)
+  projection_action <- match.arg(projection_action)
+  modern <- solver %in% c("osqp","dykstra","dual_newton","quadprog") ||
+    !is.null(total_lower) || !is.null(total_upper) ||
+    (solver == "auto" && method %in% c("linear","truncated") &&
+     (inherits(X,"sparseMatrix") || nrow(X)>2000L))
+  if (modern) {
+    if (!method %in% c("linear","truncated")) stop("These solvers support quadratic distances only")
+    if (method == "linear" && (!is.null(lower) || !is.null(upper)))
+      stop("Bounds are only used by truncated and logit methods")
+    if (is.null(lower)) lower <- if(method=="truncated") 0 else -Inf
+    if (is.null(upper)) upper <- if(method=="truncated") 10*d else Inf
+    ans <- calibrate_quadratic(X,d,totals,q,lower,upper,direction,solver,tol,max_iter,
+      metric_scale,total_lower,total_upper,control,warm_start)
+    ans$method <- method
+    return(ans)
+  }
+  if (length(control) || !is.null(warm_start)) stop("control/warm_start require a new quadratic solver")
+  direction <- .ct_direction(direction, ncol(as.matrix(X)))
+  if (any(direction != "=")) {
+    if (!method %in% c("linear", "truncated"))
+      stop("Inequalities currently support quadratic distances only (linear/truncated)")
+    if (!solver %in% c("auto", "qp"))
+      stop("Mixed constraints use the single QP solver; choose solver='auto' or 'qp'")
+    return(.ct_augment_legacy(.ct_mixed_fit(X, d, totals, q, method, lower, upper,
+                         metric_scale, tol, rank_tol, direction),X,d,totals,started,direction))
+  }
+  if (method %in% c("raking", "logit")) {
+    if (!solver %in% c("auto", "dual", "newton"))
+      stop("Raking/logit use solver='newton' only (auto/dual are aliases)")
+    message(method, ": using damped Newton-Raphson (BFGS safeguard if needed)")
+  }
+  if (method == "linear" && !solver %in% c("auto", "dual"))
+    stop("Linear equality calibration uses the analytic solver; use solver='auto'")
+  if (method == "truncated" && solver == "newton") solver <- "dual"
   dat <- .ct_data(X, totals); X <- dat$X; totals <- dat$totals
   n <- nrow(X)
   d <- .ct_vec(d, n, "d", scalar = FALSE)
@@ -66,11 +109,14 @@ calibrate_weights <- function(X, d, totals, q = 1,
     la <- .ct_pinv(crossprod(red$A, red$A * v), red$b - as.numeric(crossprod(red$A, d)))
     ans <- list(w = d + v * as.numeric(red$A %*% la), lambda = la,
                 iterations = 1L, converged = TRUE)
+  } else if (method == "truncated" && solver == "projection") {
+    return(.ct_augment_legacy(.ct_projection_fit(X, d, totals, q, v, L, U, red, tol,
+                              max_iter, projection_action),X,d,totals,started,direction))
   } else if (method == "truncated" && solver == "qp" && red$rank > 0L) {
     used <- "qp"
     ans <- .ct_qp(red$A, red$b, d, v, L, U)
   } else {
-    used <- "dual"
+    used <- if (method %in% c("raking", "logit")) "newton" else "dual"
     ans <- .ct_dual(red$A, red$b, d, v, method, L, U, tol * 0.1, max_iter)
     good <- ans$converged && .ct_error(X, ans$w, totals) <= tol
     if (!good && method == "truncated" && solver == "auto" && n <= 2000L) {
@@ -94,12 +140,12 @@ calibrate_weights <- function(X, d, totals, q = 1,
   names(lambda) <- colnames(X)
   objective <- if (method %in% c("linear", "truncated")) sum((w - d)^2 / (2 * v)) else
     calibration_distance(w, d, q, method, lower = L, upper = U)
-  structure(list(g = g, lambda = lambda, weights = w,
+  .ct_augment_legacy(structure(list(g = g, lambda = lambda, weights = w,
     residuals = setNames(as.numeric(crossprod(X, w)) - totals, colnames(X)),
     max_scaled_residual = err, objective = objective, converged = TRUE,
     status = "optimal", iterations = ans$iterations, method = method,
     solver = used, rank = red$rank, lower = L, upper = U,
-    metric_scale = v / q, q = q), class = "caltools_fit")
+    metric_scale = v / q, q = q), class = "caltools_fit"),X,d,totals,started,direction)
 }
 
 #' Evaluate the calibration distance in final weights
@@ -151,9 +197,13 @@ calibration_distance <- function(w, d, q = 1,
 calibrate <- function(X, d, totals, q = rep(1, length(d)),
   method = c("linear", "raking", "truncated", "logit"),
   lower = NULL, upper = NULL, description = FALSE, max_iter = 500,
-  metric_scale = NULL, tol = 1e-8, solver = "auto") {
+  metric_scale = NULL, tol = 1e-8, solver = "auto", direction = "=",
+  projection_action = c("report", "refine", "error"),
+  control = list(), warm_start = NULL, total_lower = NULL, total_upper = NULL) {
   z <- calibrate_weights(X, d, totals, q, match.arg(method), lower,
-    upper, metric_scale, solver, tol = tol, max_iter = max_iter)
+    upper, metric_scale, solver, tol = tol, max_iter = max_iter,
+    direction = direction, projection_action = match.arg(projection_action),
+    control = control, warm_start = warm_start, total_lower = total_lower, total_upper = total_upper)
   if (description) print(z)
   z
 }

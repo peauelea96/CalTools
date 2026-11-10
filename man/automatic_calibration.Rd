@@ -23,7 +23,12 @@ automatic_calibration(
   type = c("g-weight", "w-weight"),
   metric_scale = NULL,
   max_nodes = 1000L,
-  on_inconsistency = c("stop", "merge")
+  on_inconsistency = c("stop", "merge"),
+  feasibility_method = "auto",
+  feasibility_max_iter = 500L,
+  feasibility_fallback = TRUE,
+  solver = "auto",
+  projection_action = "refine"
 )
 }
 \arguments{
@@ -65,6 +70,16 @@ For signed or zero d specify a positive scale explicitly.}
 \item{on_inconsistency}{How to handle incompatible totals: stop returns an
 empty search with a diagnostic; merge explicitly allows searching problems
 with weakened constraints after permitted aggregations.}
+
+\item{feasibility_method}{Feasibility backend passed to calibration_feasibility.}
+
+\item{feasibility_max_iter}{Iteration budget for feasibility.}
+
+\item{feasibility_fallback}{Allow LP after an inconclusive iterative check.}
+
+\item{solver}{Calibration solver passed to calibrate_weights.}
+
+\item{projection_action}{Action on an uncertified projection; defaults to refine in workflows.}
 }
 \value{
 List of candidate lists with fit, weights, g, X, totals, bounds,

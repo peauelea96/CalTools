@@ -1,5 +1,751 @@
-CalTools: Advanced Calibration Tools
-================
+# CalTools 0.4.0: advanced survey calibration
+
+CalTools separates three questions: **are the controls compatible, do bounded
+weights exist, and are the fitted weights optimal for the chosen distance?**
+The package provides a unified `calibrate()` interface, vector weight bounds,
+mixed equality/inequality controls, independent feasibility diagnostics,
+projection certificates, and automatic or assisted margin/bound workflows.
+All bounds in this API refer to **final weights**, not factors.
+
+## Solvers escalables añadidos en 0.4.0
+
+Se conserva la interfaz anterior, incluidos `qp`, `dual`, `projection` y
+`newton`, el orden inicial de las salidas (`g`, `lambda`), las distancias no
+cuadráticas y la métrica explícita para pesos iniciales con signo.
+`projection` sigue siendo la regla irreversible anterior: **no es Dykstra**.
+
+La revisión localizó dos cuellos de botella: `diag(n)` y `diag(1/h,n)` en QP,
+y la conversión inicial de matrices dispersas mediante `as.matrix(X)`.
+La nueva infraestructura prepara una matriz dispersa de controles y un vector
+h; los solvers nuevos evitan matrices densas n×n. Dykstra y Newton sí forman
+matrices densas pequeñas del tamaño del número de controles. No son métodos
+pensados para cientos de miles de controles.
+
+### Interfaz y ejemplo reproducible
+
+```r
+library(CalTools)
+library(Matrix)
+set.seed(42)
+n <- 10000
+X <- cbind(N = rep(1, n), x = rnorm(n), zona = rbinom(n, 1, .3))
+d <- runif(n, .8, 1.2)
+known_weights <- pmin(2, pmax(.2, d + .15 * X[, "x"]))
+t <- as.numeric(crossprod(X, known_weights))
+fit <- calibrate_quadratic(Matrix(X, sparse = TRUE), d, t,
+  lower = .2, upper = 2, direction = c("=", "=", "<="),
+  solver = "osqp", tol = 1e-7, max_iter = 20000)
+fit$status
+fit$kkt
+calibration_diagnostics(fit)$totals
+summary(calibration_diagnostics(fit)$weights)
+
+# Intervalos: sus extremos REEMPLAZAN totals y direction.
+interval_fit <- calibrate_quadratic(X, d,
+  total_lower = c(t[1], t[2] - 10, -Inf),
+  total_upper = c(t[1], t[2] + 10, t[3]),
+  lower = .2, upper = 2, solver = "dykstra")
+
+# La interfaz histórica también admite los solvers nuevos.
+fit2 <- calibrate(X, d, t, method = "truncated", lower = .2, upper = 2,
+  direction = c("=", "=", "<="), solver = "dual_newton",
+  control = list(fallback_osqp = TRUE), max_iter = 20000)
+```
+
+X siempre tiene **unidades en filas y controles en columnas**. Las cotas son
+sobre w, y los factores son g=w/d; no se convierten cotas de g implícitamente.
+El objetivo común es `sum((w-d)^2/(2*d*q))`, con d,q positivos.
+La alternativa histórica `metric_scale` sustituye d en el denominador y debe
+ser positiva: no es un cambio automático del objetivo. Todos los solvers usan
+el mismo vector h=`metric_scale*q` (por defecto d*q).
+
+### Algoritmos y fundamento
+
+* **OSQP**: P=diag(1/h), término lineal -d/h y restricciones
+  `l <= rbind(t(X), I) %*% w <= u`. P e I son diagonales dispersas. El objetivo
+  que devuelve CalTools incluye la constante omitida por el QP. Se admiten
+  las interfaces R6 de osqp 0.6 y S7 de osqp 1.0; la validación ejecutada usa
+  **osqp 1.0.0**. `control` transmite ajustes del backend, incluido verbose.
+  `warm_start` acepta pesos o un fit anterior; reutiliza la inicialización
+  primal, no la factorización entre llamadas.
+* **Dykstra**: proyección de d en la intersección de conjuntos convexos bajo
+  la norma H^-1. El bloque de igualdades usa
+  `z + H A' (A H A')† (t-Az)`; las cotas, clip; cada semiespacio,
+  `z - H c * max(c'z-b,0)/(c'Hc)`. Las correcciones restauran las normales
+  acumuladas y distinguen el método de proyecciones alternadas simples.
+  Se guarda un multiplicador por igualdad, un escalar por semiespacio y
+  un vector de n correcciones para la caja, sin una matriz n×K de correcciones.
+  Para intersección no vacía converge a la proyección única; puede ser lento
+  cerca de tangencias. La parada exige factibilidad, KKT y estabilización.
+  La pseudoinversa usa un umbral relativo 1e-12 del Gram: un rango casi
+  singular puede impedir alcanzar la tolerancia, lo que se informa.
+* **Newton semisuave dual, experimental**: escribir B=[A;C], y=[alpha;mu],
+  alpha=-lambda, mu>=0. Para s=B'y, w=clip(d-Hs,L,U), minimizar
+  `phi(y) = -sum((w-d)^2/(2h) + s*w) + rhs'y`.
+  Su gradiente es rhs-Bw; una Hessiana generalizada es B H_free B'.
+  La complementariedad exige mu>=0, b-Cw>=0 y mu*(b-Cw)=0.
+  Se identifican dinámicamente multiplicadores activos, se regulariza la
+  Hessiana, se proyectan multiplicadores y se aplica búsqueda Armijo.
+  Si falla la dirección Newton, se intenta gradiente proyectado. La
+  convergencia rápida local necesita una geometría activa suficientemente
+  regular; no se afirma convergencia global ni robustez ante toda degeneración.
+  `control=list(regularization=1e-10, fallback_osqp=TRUE)` permite respaldo
+  explícito con OSQP. Se conserva el estado del intento fallido en `$fallback`.
+  Un warm start dual requiere un fit compatible con multiplicadores.
+* **quadprog**: referencia densa, limitada a 2.000 unidades para proteger
+  memoria. Los controles redundantes se reducen antes del QP. `qp` conserva
+  su significado histórico; `quadprog` usa la nueva salida común.
+
+La convexidad estricta (h>0) asegura pesos óptimos únicos cuando el conjunto
+es no vacío, aunque los multiplicadores no sean únicos. Las identidades de
+proyección y KKT concuerdan con el documento de fundamentos del proyecto.
+No se deduce infactibilidad del fracaso de una proyección o de Newton.
+
+### Selección automática y compatibilidad
+
+`calibrate_quadratic(..., solver="auto")` usa quadprog si n<=200, p<=20,
+la entrada es densa y su densidad supera .2. En otros casos usa OSQP si está
+instalado; si no, Dykstra. Nunca elige automáticamente Newton experimental.
+La razón y el método elegido aparecen en `$selection_reason` y `$solver`.
+
+`calibrate_weights`/`calibrate` conservan las rutas históricas de `auto` para
+entradas densas de hasta 2.000 filas. Con entradas dispersas o más de 2.000
+filas, las distancias cuadráticas pasan a la nueva selección. Este cambio es
+explícito: esas rutas devuelven estados de no convergencia en vez de lanzar
+el error numérico de la implementación antigua. Para conservar exactamente
+la ruta antigua, elegir `dual`, `qp` o `projection` según corresponda.
+Raking/logit siguen informando que usan Newton amortiguado; no admiten los
+nuevos solvers cuadráticos.
+
+### Diagnóstico y estados
+
+Los nuevos resultados incluyen pesos, g, objetivo, iteraciones, tiempos,
+residuos, KKT, multiplicadores, problema disperso y datos del backend:
+
+| Estado | Significado |
+|---|---|
+| `optimal_numerical` | El método declara éxito y pasa la comprobación KKT a tol |
+| `approximate` | OSQP informa solved inaccurate, o un candidato no pasa KKT |
+| `not_converged` | Presupuesto agotado, estancamiento u otro fracaso sin certificado |
+| `infeasible_certified` | OSQP aporta certificado de Farkas verificado numéricamente a tol |
+
+El último es un **certificado numérico**, no una prueba con aritmética exacta.
+Se comprueban residuo de la ecuación de Farkas y soporte estrictamente negativo.
+Los estados de infactibilidad no contienen pesos utilizables. Dykstra y Newton
+no certifican infactibilidad. La función independiente
+`calibration_feasibility(..., direction=...)` conserva el LP para ese fin.
+
+Las igualdades y violaciones de controles se escalan por el máximo de 1 y sus
+extremos finitos; las cotas, por max(1,abs(w)); la estacionariedad por la escala
+del gradiente. La complementariedad se mide en unidades absolutas del
+objetivo. Esto puede ser exigente con escalas grandes; conviene reescalar
+controles mal condicionados y examinar los residuos. Un estado óptimo nunca
+se decide únicamente por estabilización de pesos.
+
+`lambda` conserva la convención histórica gradiente=X lambda más normales de
+cotas; `$duals$controls=-lambda` usa la convención estándar de OSQP.
+`calibration_diagnostics(fit)` muestra controles antes/después, violación,
+lambda, pesos iniciales/finales, cambios, g, cuantiles, duales de cotas y KKT.
+También funciona con los fits históricos producidos por esta versión. Para
+raking/logit no aplica un diagnóstico KKT cuadrático. En esos fits se conserva
+`status="optimal"` y se añade `$termination`, sin alterar los primeros campos.
+
+### Instalación y dependencias
+
+Matrix es dependencia obligatoria; osqp es opcional. Dykstra y Newton no
+requieren osqp. Solicitarlo explícitamente sin instalarlo da un error claro.
+
+```r
+install.packages(c("Matrix", "osqp", "quadprog", "lpSolve"))
+install.packages("CalTools_0.4.0.tar.gz", repos=NULL, type="source")
+```
+
+### Benchmark reproducible
+
+Ejecutar `Rscript benchmarks/scalable.R` desde la raíz del proyecto instalado.
+La semilla es 20261021. Se evalúan n=1.000, 3.000, 10.000, 50.000 y 100.000,
+tres perfiles (6 controles/2 desigualdades/densidad 1; 16/6/.05; 16/6/.1 con
+cotas estrechas) y tres repeticiones. Hay tiempos de generación, preparación
+común + backend, resolución y total; objetivo, KKT, iteraciones, estados,
+cotas activas y memoria asignada por R. El total incluye validación.
+
+La memoria registrada por `Rprofmem` es asignación acumulada de R, **no pico
+RSS**, y excluye asignaciones nativas internas de OSQP. Las mediciones incluyen
+el coste de instrumentación. Quadprog se omite deliberadamente para n>2.000.
+Los resultados son exploratorios en un único entorno, no garantizan un orden
+de rendimiento general ni sustituyen pruebas con datos reales.
+
+Resultados completos: `benchmarks/results.csv`; entorno y versiones:
+`benchmarks/sessionInfo.txt`. Las secciones siguientes conservan la guía y
+los ejemplos de funcionalidades de 0.3.0.
+
+### Resultados medidos en este entorno
+
+Medianas de tiempo total (segundos), tres repeticiones, perfil de 16 controles,
+6 desigualdades, densidad .1 y cotas estrechas. Tolerancia 1e-6 y máximo 1.000
+iteraciones por método. El asterisco indica una solución aproximada de OSQP,
+por lo que su tiempo no representa haber alcanzado la misma precisión.
+
+| n | OSQP | Dykstra | Newton dual |
+|---:|---:|---:|---:|
+| 1000 | 0.007 | 0.014 | 0.007 |
+| 3000 | 0.015 | 0.015 | 0.010 |
+| 10000 | 0.114 | 0.058 | 0.022 |
+| 50000 | 1.806* | 0.236 | 0.098 |
+| 100000 | 4.395* | 0.444 | 0.226 |
+
+De 144 ejecuciones realizadas, 138 pasaron KKT y 6 quedaron como aproximadas;
+otras 36 combinaciones de quadprog se omitieron por el límite de tamaño.
+En el perfil estrecho, el máximo residuo KKT de OSQP fue 0.00539 para
+50.000 unidades y 0.00964 para 100.000. Los CSV conservan objetivos, memoria
+asignada por R, cotas activas y tiempos separados de todas las ejecuciones.
+
+Estas muestras favorecen estructuras con pocos controles y no demuestran
+superioridad universal. La validación de Newton sigue siendo limitada; faltan
+ensayos extensos con datos reales, conjuntos casi infactibles y escalas extremas.
+
+---
+
+## What changed in 0.3.0
+
+| Requested capability | Interface | Implemented behavior |
+|---|---|---|
+| General calibration | `calibrate()` or `calibrate_weights()` | Both interfaces accept the same control directions and solver choices |
+| Vector bounds | `lower`, `upper` | Scalars or one bound per observation, including fixed weights |
+| Projection-and-fixing | `solver="projection"` | Weighted affine projections on successively selected faces; returns a checked certificate |
+| Action after failed certification | `projection_action` | `report`, `refine`, or `error`; defaults to `report` in direct fitting |
+| Proposed fixing feasibility | `method="fixing"` | Only a checked witness proves feasibility; failure is indeterminate, optionally followed by LP |
+| Certified projected feasibility | `method="pfc"` | Witness warm start, accelerated projected residual minimization, support separation, optional LP |
+| Mixed controls | `direction=c("=","<=",">=")` | One QP backend (`quadprog`) for quadratic calibration; one LP backend (`lpSolve`) for feasibility |
+| Select feasibility throughout search | `feasibility_method` | Passed through preflight, bound grids, modified margins and every automatic-search node |
+| Nonlinear solver transparency | `solver="newton"` | Raking/logit emit a message identifying damped Newton and its BFGS safeguard |
+| Reproducible performance evaluation | `inst/benchmarks/advanced.R` | Generates problems, warms solvers, records repeated elapsed times, failures and actual backends |
+
+The source archive is installable; the project ZIP includes the source,
+examples, mathematical notes, tests, benchmark CSVs and validation logs.
+
+```r
+install.packages(c("lpSolve", "quadprog"))
+install.packages("CalTools_0.3.0.tar.gz", repos=NULL, type="source")
+library(CalTools)
+```
+
+There is no machine-specific `sourceCpp()` dependency. R >= 4.1 is required.
+`testthat`, `roxygen2` and `knitr` are development tools, not runtime requirements.
+
+## Quick start: one function, explicit constraints
+
+```r
+X <- cbind(N=c(1,1), cap=c(1,0), floor=c(0,1))
+fit <- calibrate(X, d=c(1,1), totals=c(N=4,cap=1,floor=2),
+  method="truncated", lower=c(0,0), upper=c(2,5),
+  direction=c("=","<=",">="))
+fit$weights                  # c(1,3)
+fit$solver                   # "qp"
+fit$certificate$optimal      # TRUE, within the declared numerical tolerance
+crossprod(X, fit$weights)    # N=4; cap=1 <= 1; floor=3 >= 2
+```
+
+A scalar `direction="="` means all controls are exact. `direction="<="` or
+`">="` applies to every column. A vector must have one entry per column;
+there is no partial recycling. Totals must be finite; named totals must match
+column names and order exactly. `==`, `<`, `>` and `NA` are rejected.
+
+For a control interval `a <= x'w <= b`, include two copies of that control
+with **distinct column names**, and use `>=` and `<=`. For example:
+
+```r
+X <- cbind(N=rep(1,4), x_lo=1:4, x_hi=1:4)
+fit <- calibrate(X, rep(2,4), c(N=8,x_lo=21,x_hi=23),
+  method="truncated", lower=0, upper=c(4,5,5,6),
+  direction=c("=",">=","<="))
+stopifnot(abs(sum(fit$weights)-8)<1e-7,
+          sum((1:4)*fit$weights)>=21-1e-7,
+          sum((1:4)*fit$weights)<=23+1e-7)
+```
+
+Do not run an equality-consistency diagnosis on the entire mixed system:
+different endpoints of an interval are not conflicting equalities. The mixed
+QP reduces only the equality block (including fixed weights); the mixed LP
+keeps the directions. Existing margin-aggregation workflows remain intended
+for exact controls. Their aggregation semantics have **not** been generalized
+to arbitrary inequalities.
+
+## Distances and solver dispatch
+
+Write `h = metric_scale*q`, with `h_i > 0`. The quadratic objective is
+
+$$f(w)=\frac12\sum_i (w_i-d_i)^2/h_i.$$
+
+The default is `metric_scale=d`, requiring positive `d`, so this is the usual
+chi-square metric with `h_i=d_i*q_i`. Supplying `metric_scale=1` changes the
+metric and permits zero or negative starting weights. This choice is explicit:
+negative weights never silently produce a nonconvex quadratic objective.
+
+| Controls / distance | Solver choices | Meaning |
+|---|---|---|
+| Equality, `linear` | `auto` (`dual` compatibility alias) | One analytic weighted affine projection |
+| Equality, `truncated` | `auto`, `dual`, `qp`, `projection` | Safeguarded dual, reference QP, or the fixing heuristic with certification |
+| Equality, `raking` | `newton`, `auto`, `dual` | Same damped Newton implementation, with a BFGS safeguard if needed |
+| Equality, `logit` | `newton`, `auto`, `dual` | Same nonlinear implementation, with finite bounds enclosing `d` |
+| Any inequality, quadratic | `auto` or `qp` | Both select the **same** QP backend |
+| Any inequality, raking/logit | Not implemented | Explicit error; the distance is never silently replaced by a quadratic |
+
+For truncated equalities, `auto` tries the reduced dual and can fall back to QP
+when `n<=2000`; `newton` is also accepted as an alias of `dual`. `solver="dual"`
+does not silently use QP. The current dual routine can use BFGS after damped
+Newton fails its stopping criterion, so it is not described as pure Newton.
+The returned `$solver` identifies the route, including `qp-fallback` and
+`projection+...` when applicable.
+
+```r
+X <- matrix(1,3,1)
+r <- calibrate(X, rep(1,3), 6, method="raking", solver="newton")
+l <- calibrate(X, rep(1,3), 6, method="logit", lower=0, upper=3)
+# Each call announces the actual nonlinear solver.
+# calibrate(X, rep(1,3), 6, method="raking", solver="qp") is an error.
+```
+
+Logit is a bounded nonlinear distance; it is not the same distance as truncated
+quadratic calibration. Raking has no user weight bounds here. Nonlinear roots
+may fail to exist at a boundary-only target even when the corresponding closed
+box is feasible. Nonconvergence does not establish infeasibility.
+
+## Why each calibration algorithm works, and when it does not
+
+### Analytic linear calibration
+
+With `A=t(X)` and `H=diag(h)`, equality stationarity gives
+`w=d+H A' lambda`. Substitution into `Aw=t` gives
+
+$$w=d+HA^T(AHA^T)^+(t-Ad).$$
+
+The pseudoinverse handles redundant **consistent** controls. It does not repair
+inconsistent totals. Rank reduction and the final residual check are separate
+steps. Strict convexity gives a unique weight solution, even when multipliers
+are not unique.
+
+### Truncated dual
+
+Minimizing the Lagrangian over the box gives
+
+$$w(\lambda)=\operatorname{clip}_{[L,U]}(d+HA^T\lambda).$$
+
+A root of `Aw(lambda)=t` is a global optimum. The implementation recomputes bound
+activity at every evaluation, so a coordinate may leave a bound. The derivative
+uses only currently free weights. Singular free-set Hessians and overshoots are
+handled by safeguards and line search, with an optional quasi-Newton phase.
+Neither ordinary Newton nor a fixed iteration budget guarantees convergence
+for every input.
+
+### Projection-and-fixing, as in the supplied `calib` proposal
+
+1. Project the original `d` onto the equalities in the `H^-1` metric.
+2. Clip violated coordinates and fix them permanently.
+3. Subtract their contribution from the target and re-project the remaining
+   coordinates, still centred at their original `d`.
+4. Stop with a checked feasible point, an incompatible selected face, or an
+   iteration limit.
+
+There are at most `n` strict enlargements of the fixed set, but **this does not
+prove that the selected face contains the optimum or even a feasible point**.
+The original notes' general finite-step correctness claim is false. The
+advanced foundations draft correctly separates this heuristic from a certified
+optimization method. The weighted Hessian is `diag(1/(metric_scale*q))` under
+this package's normalization.
+
+A useful special case is a single nonnegative control, with `d` initially
+inside the box: the multiplier moves monotonically, so previously fixed bounds
+have the correct KKT sign. Multiple overlapping controls do not have that
+property in general.
+
+### Exact five-unit counterexample and certificate
+
+```r
+X <- matrix(c(3,0,1,1,1, 0,1,1,0,3), nrow=5)
+a <- calibrate(X, rep(1,5), c(.8,.4), method="truncated",
+  lower=0, upper=1.2, solver="projection")
+# Warning: feasible projection; optimality not certified.
+a$weights   # c(0, 1/3, 1/15, 11/15, 0)
+a$status    # "feasible_uncertified"
+a$objective # 127/75
+
+b <- calibrate(X, rep(1,5), c(.8,.4), method="truncated",
+  lower=0, upper=1.2, solver="projection", projection_action="refine")
+b$weights   # c(1/35, 38/105, 4/105, 71/105, 0)
+b$objective # 71/42; improvement = 1/350
+b$projection$certificate # retains the first attempt for audit
+```
+
+The feasible direction `(1,1,-1,-2,0)` has negative directional derivative at
+`a$weights`, independently proving its suboptimality. This case is in the
+regression tests and benchmark data.
+
+Use `projection_action="report"` when studying the heuristic and its residuals;
+`"error"` requires certification; `"refine"` continues with the safeguarded
+quadratic solver if needed. Direct `report` raises an error when the projection
+is not even feasible, with a message explicitly distinguishing failure from
+infeasibility. It never returns an infeasible vector as fitted weights.
+Automatic calibration defaults to `projection_action="refine"` when projection
+is selected.
+
+### Independent optimality checks
+
+For equalities define `p=(w-d)/h-X lambda`. Exact KKT conditions are:
+
+- `p_i=0` at an interior weight;
+- `p_i>=0` at a lower bound;
+- `p_i<=0` at an upper bound;
+- no condition on `p_i` when `L_i=U_i`.
+
+These are equivalent to the clipped multiplier formula. Polyhedral constraints
+make them necessary and sufficient even without a strictly interior feasible
+point. A least-squares multiplier on free weights may not be the only valid
+choice. If needed, an LP searches for alternative equality multipliers; this
+prevents rejecting optimal all-bound or rank-deficient solutions just because
+a particular multiplier was unsuitable.
+
+```r
+certificate <- calibration_certificate(X, rep(1,5), c(.8,.4), a$weights,
+  lower=0, upper=1.2)
+certificate[c("optimal", "primal_feasible", "max_scaled_stationarity",
+              "duality_gap", "kkt_objective_bound")]
+```
+
+For any multiplier, put `z=clip(d+h*X lambda,L,U)`. The dual value is
+
+$$D(\lambda)=\lambda^Tt+\sum_i\left\{(z_i-d_i)^2/(2h_i)-(X\lambda)_i z_i\right\}.$$
+
+For an **exactly feasible** candidate, `f(w)-D(lambda)` bounds its objective
+error. If `e_i` is the KKT sign violation (zero on a fixed coordinate), then
+
+$$f(w)-f(w^*)\le \tfrac12\sum_i h_i e_i^2,\qquad
+\|w-w^*\|_{H^{-1}}\le \sqrt{\sum_i h_i e_i^2}.$$
+
+`calibration_certificate()` returns these diagnostics, the multipliers and the
+raw duality gap. A slightly negative gap can occur for approximately feasible
+floating-point candidates; it is deliberately not clipped to hide this.
+The theoretical error bounds assume exact primal feasibility. The Boolean
+`optimal` means that declared numerical checks passed, **not** a rational or
+interval-arithmetic proof. A failed certificate alone is not proof that a
+candidate is suboptimal. The returned `converged` on a reported projection
+means primal convergence; consult `status` and `certificate$optimal` for
+optimality.
+
+### One QP for mixed constraints
+
+`quadprog::solve.QP` minimizes the positive-definite quadratic with equality
+constraints first and inequality constraints afterwards. `<=` controls are
+negated to the backend's `>=` convention. The equality block is reduced before
+solving; fixed weights are incorporated in that reduction. Bound activity may
+enter and leave, unlike irreversible fixing. After solving, CalTools checks
+primal violations, the clipped stationarity identity, multiplier signs and
+complementarity in the **original** controls.
+
+In the convention `gradient=X lambda`, `<=` multipliers are nonpositive and
+`>=` multipliers nonnegative. Multipliers of equalities are unrestricted. The
+code reconstructs their signs from stationarity because the QP backend can
+internally flip equality columns.
+
+The `highs` R interface was considered: it supports the same convex QP
+formulation, and is a natural future sparse backend. This release deliberately
+uses the already required `quadprog` as the sole mixed optimizer, rather than
+introducing a second implementation. Its dense matrices impose an explicit
+**2000-observation limit**. This is a practical small/medium-problem integration,
+not a sparse large-survey solver. The independent mixed LP uses sparse constraint
+triplets and has no quadratic identity-matrix allocation.
+
+## Feasibility independently of fitting
+
+```r
+X <- cbind(N=c(1,1), cap=c(1,0), floor=c(0,1))
+f <- calibration_feasibility(X, c(N=4,cap=1,floor=2), 0, 5,
+  direction=c("=","<=",">="))
+f$feasible # TRUE
+f$weights  # some witness, not necessarily optimal calibration weights
+
+bad <- calibration_feasibility(X, c(N=4,cap=1,floor=5), 0, 5,
+  direction=c("=","<=",">="))
+bad$feasible # FALSE
+```
+
+For mixed controls, `auto` and `lp` select the same LP. Other requested
+feasibility algorithms are rejected explicitly. Finite or infinite weight
+bounds are supported in this route; unrestricted weights are split into positive
+and negative parts. LP infeasibility is reported as a solver diagnosis, not as
+a separately reconstructed rational Farkas certificate.
+
+For all-equality controls:
+
+| `method` | Procedure after common checks | If the procedure is inconclusive |
+|---|---|---|
+| `auto` / `pfc` | Fixing witness attempt, then accelerated projected residuals and separation | LP if `fallback=TRUE`; otherwise `feasible=NA` |
+| `fixing` | Original centre-initialized face-fixing idea, in a positive Euclidean metric | LP or `NA`; never FALSE solely because a face fails |
+| `projection` | Ordinary alternating affine/box projections (retained compatibility option) | LP or `NA`; not an optimization solver |
+| `lp` | Shifted primal LP | Numerical failure gives `NA` |
+
+All methods first validate the problem, check linear consistency, the midpoint,
+and individual control ranges over the box. Thus `$solver` may be `rank`,
+`midpoint` or `box-certificate` even when `method="lp"`. Compare actual routes
+as well as requested methods. Equality feasibility requires finite bounds.
+`max_iter` is a budget per iterative stage: the fixing warm start uses at most
+`min(n+1,max_iter)` iterations, followed by up to `max_iter` PFC iterations.
+
+### Why the original feasibility rule needs correction
+
+With bounds `[0,1]`, let
+
+```r
+X <- t(rbind(c(2,0,-1,1,0), c(1,-3,0,0,0),
+             c(1,0,0,1,0), c(2,0,0,0,3)))
+totals <- c(7/4,1,7/4,2)
+witness <- c(1,0,1,3/4,0)
+stopifnot(max(abs(crossprod(X,witness)-totals))<1e-12)
+calibration_feasibility(X, totals, 0, 1, method="fixing", fallback=FALSE)$feasible
+# NA: the centre projection fixes a wrong face.
+calibration_feasibility(X, totals, 0, 1, method="pfc", max_iter=10000,
+                        tol=1e-7, fallback=FALSE)$feasible
+# TRUE
+```
+
+The first projection fixes coordinates 2 and 4, including `w_4=1`, whereas the
+feasible system requires `w_4=3/4`. The contradictory selected face does not
+make the original box-affine intersection empty. The proposed fixing idea is
+therefore implemented as a useful heuristic, not as a valid Boolean decision
+procedure on all inputs.
+
+### Why PFC works
+
+For `A=t(X)` and `B=[L,U]`, feasibility means `t` belongs to the zonotope `AB`.
+Minimize `F(w)=0.5*||Aw-t||^2` on `B`. Its gradient is `A'(Aw-t)` with Lipschitz
+constant `||A||_2^2`. PFC uses accelerated projected-gradient steps with step
+`1/||A||_2^2`; projection onto `B` is componentwise clipping. Coordinates are
+allowed to leave their bounds. The accelerated extrapolated point need not be
+in the box; only the projected iterate is used as a witness.
+
+For any direction `v`, the box support is
+
+$$\sigma(v)=\sum_i\max\{L_i(A^Tv)_i,U_i(A^Tv)_i\}.$$
+
+If `S(v)=v't-sigma(v)>0`, no feasible weight vector exists. Taking
+`v=t-Aw` from residual minimization eventually produces strict separation for
+strictly infeasible finite-box problems in exact arithmetic. For any box weight
+and nonzero direction,
+
+$$\max(0,S(v)/\|v\|)\le \operatorname{dist}(t,AB)\le\|Aw-t\|.$$
+
+The implementation keeps the best lower and upper distance bounds. It scales
+controls by `max(1,abs(total))` before iterating; reported distances use those
+scaled Euclidean units. Certificate directions are also returned in original
+units so the support inequality can be checked independently.
+
+```r
+X <- rbind(c(1,0),c(0,1),c(1,1))
+f <- calibration_feasibility(X,c(2,0),0,1,method="pfc",fallback=FALSE)
+v <- f$certificate$direction
+sum(v*c(2,0)) - sum(pmax(as.numeric(X%*%v),0)) # strictly positive
+f[c("distance_lower","distance_upper","iterations","status")]
+```
+
+Checking each marginal range alone misses this joint infeasibility. The tests
+specifically cover it, rather than benchmarking only trivially impossible
+individual totals.
+
+FISTA gives `F(w_k)-min F <= 2*L*R^2/(k+1)^2`, where `L=||A||^2` and
+`R=||(U-L_bounds)/2||`. The finite-detection argument in the supplied advanced
+draft follows by projecting `t` onto `AB` and using the Lipschitz continuity of
+`S`. It is mathematically valid under its stated assumptions. The bound becomes
+pessimistic near the feasibility boundary; it is not a universal `n`-iteration
+bound or a speed guarantee.
+
+Floating-point separation must exceed both a conservative rounding guard and
+the maximum tolerance allowed in the certificate direction. This prevents a
+tiny positive rounded number from being treated as conclusive. It remains a
+numerical certificate, not verified interval arithmetic. The boundary example
+above may be indeterminate at short budgets. `fallback=TRUE` is the operational
+default; use `FALSE` for algorithm research and timing the iterative stage alone.
+
+## Generated examples for the new features
+
+```r
+p <- generate_calibration_problem(n=80, categorical_groups=c(5,4),
+  n_binary=2, n_continuous=2, n_zero=1, n_derived=1,
+  weight_cv=.25, difficulty=.45, seed=2026)
+# Make the already vector-valued bounds still more heterogeneous without
+# removing the constructive witness.
+L <- p$lower-seq(0,.2,length.out=80)
+U <- p$upper+seq(.2,0,length.out=80)
+a <- calibrate(p$X,p$d,p$totals,p$q,"truncated",L,U,solver="dual")
+b <- calibrate(p$X,p$d,p$totals,p$q,"truncated",L,U,solver="projection",
+               projection_action="refine")
+stopifnot(max(abs(a$weights-b$weights))<1e-4)
+
+# Preserve some equalities, replace others by upper/lower controls.
+dir <- rep(c("=","<=",">="),length.out=ncol(p$X))
+target <- p$totals
+slack <- .02*pmax(1,abs(target))
+target[dir=="<="] <- target[dir=="<="]+slack[dir=="<="]
+target[dir==">="] <- target[dir==">="]-slack[dir==">="]
+mix <- calibrate(p$X,p$d,target,p$q,"truncated",L,U,direction=dir)
+stopifnot(mix$certificate$optimal, mix$objective<=a$objective+1e-6)
+```
+
+The generated witness still satisfies the weakened mixed system. Its minimum
+quadratic distance cannot exceed the minimum under the original equalities.
+This provides a useful cross-check beyond solver return codes. It does not mean
+that weaker calibration necessarily gives a statistically preferable estimator.
+
+## Select the feasibility solver in automatic or assisted calibration
+
+```r
+p <- generate_calibration_problem(n=40,categorical_groups=c(4,3),
+  n_continuous=1,difficulty=.8,seed=112)
+solutions <- automatic_calibration(p$X,p$totals,p$d,q=p$q,
+  lower=p$lower,upper=p$upper,bounds=p$bounds,method="upper",
+  search_limits=3,step=.1,margin_groups=p$margin_groups,ordered=p$ordered,
+  max_solutions=2,max_depth=1,feasibility_method="pfc",
+  feasibility_max_iter=500,feasibility_fallback=TRUE,
+  solver="projection",projection_action="refine")
+```
+
+The same feasibility options are accepted by `calibration_preflight()`,
+`analyze_feasibility_bounds()`, `check_modified_feasibility()` and
+`check_sequential_feasibility()`. `interactive_calibration()` forwards them
+through `...`; provide `choose=function(candidates) 1L` in a script.
+
+When fallback is disabled, an inconclusive diagnosis stops a Boolean-dependent
+bound search instead of silently treating it as FALSE. Initial preflight returns
+its inconclusive diagnostic with no candidates. A changed feasibility solver
+can affect runtime substantially because it is called at multiple grid points
+and search nodes. `relax_bounds()` remains its own optimization LP: choosing a
+Boolean feasibility backend does not change that separate minimization problem.
+
+## Reproducible timing comparisons
+
+Run from the extracted project directory after installing this version:
+
+```r
+source("inst/benchmarks/advanced.R")
+```
+
+The script warms each route, then measures five repetitions of batches of three
+calls and records elapsed seconds per call. Generation is outside the timed
+block; validation, rank reduction, certification and any selected fallback are
+inside it. All random generation uses explicit seeds. Timings depend on machine,
+BLAS, input conditioning and active bounds; tiny timings have millisecond-level
+resolution. They measure computational work, not statistical efficiency.
+
+Calibration comparisons use the same generated problem and quadratic metric.
+A `feasible_uncertified` projection is kept as that status, not counted as an
+optimal solve. Equality feasibility comparisons disable LP fallback so its cost
+cannot be hidden; automatic-workflow comparisons enable it to measure the
+operational end-to-end route. The mixed section has only one backend and is a
+baseline measurement, not a comparison between multiple mixed solvers.
+
+<!-- BENCHMARK_TABLE_START -->
+| Case | n | Task | Requested | Median ms | Actual route | Status |
+|---|---:|---|---|---:|---|---|
+| automatic_search | 60 | workflow | fixing | 26.333 | workflow | max_solutions |
+| automatic_search | 60 | workflow | lp | 34.000 | workflow | max_solutions |
+| automatic_search | 60 | workflow | pfc | 19.333 | workflow | max_solutions |
+| automatic_search | 60 | workflow | projection | 24.333 | workflow | max_solutions |
+| boundary_feasible | 5 | feasibility | fixing | 0.667 | fixing | undetermined |
+| boundary_feasible | 5 | feasibility | lp | 1.000 | lp | feasible |
+| boundary_feasible | 5 | feasibility | pfc | 8.000 | pfc | feasible |
+| boundary_feasible | 5 | feasibility | projection | 13.333 | alternating-projections | feasible |
+| generated_0.49 | 200 | calibration | dual | 1.000 | dual | optimal |
+| generated_0.49 | 200 | calibration | projection | 1.667 | projection | optimal |
+| generated_0.49 | 200 | calibration | projection_refine | 1.667 | projection | optimal |
+| generated_0.49 | 200 | calibration | qp | 6.667 | qp | optimal |
+| generated_0.49 | 200 | feasibility | fixing | 1.667 | fixing-witness | feasible |
+| generated_0.49 | 200 | feasibility | lp | 5.000 | lp | feasible |
+| generated_0.49 | 200 | feasibility | pfc | 1.667 | fixing-witness | feasible |
+| generated_0.49 | 200 | feasibility | projection | 1.333 | alternating-projections | feasible |
+| generated_0.49 | 200 | mixed | qp | 7.333 | qp | optimal |
+| generated_0.49 | 200 | mixed_feasibility | lp | 5.333 | lp | feasible |
+| joint_infeasible | 3 | feasibility | fixing | 0.667 | fixing | undetermined |
+| joint_infeasible | 3 | feasibility | lp | 1.000 | lp | infeasible |
+| joint_infeasible | 3 | feasibility | pfc | 0.667 | pfc | infeasible_certified |
+| joint_infeasible | 3 | feasibility | projection | 10.667 | alternating-projections | iteration_limit |
+| suboptimal_projection | 5 | calibration | dual | 0.667 | dual | optimal |
+| suboptimal_projection | 5 | calibration | projection | 1.000 | projection | feasible_uncertified |
+| suboptimal_projection | 5 | calibration | qp | 0.667 | qp | optimal |
+<!-- BENCHMARK_TABLE_END -->
+
+In this run, the 200-row generated case took about 1.0 ms with the dual and
+6.7 ms with QP. PFC's 1.7 ms feasibility result in that case came from the fixing
+warm start, so it is not a measurement of FISTA iterations. On the boundary case,
+PFC took about 8 ms and LP about 1 ms; fixing alone remained indeterminate.
+For the complete automatic search, PFC took about 19 ms and LP about 34 ms.
+These examples show why no single method can be declared universally fastest.
+
+Full observations and ranges: `validation/advanced-benchmarks.csv` and
+`validation/advanced-benchmark-summary.csv`. Environment:
+`validation/session-info-0.3.0.txt`. All are included in the project ZIP.
+The benchmark script also writes `validation/benchmark-table.md`.
+
+## Validation and numerical limits
+
+The test suite checks the exact rational counterexamples, wrong-face failures,
+separation scores recalculated from original inputs, finite-budget uncertainty,
+fixed weights, nonunique multipliers, signed and zero totals, mixed directions,
+redundant equalities, independent QP agreement, nonlinear dispatch, propagation
+through search, and regression behavior of the existing API.
+
+`tests/testthat/test-advanced.R` contains the new cases. In addition to these
+checks, generated feasible and mixed problems are compared at several sizes.
+The source contains no assertion of faster performance on all instances.
+
+```r
+roxygen2::roxygenise(".")
+testthat::test_local(".")
+# Shell, from the parent directory:
+# R CMD build CalTools
+# R CMD check --no-manual CalTools_0.3.0.tar.gz
+```
+
+The current mathematical core uses dense control matrices and SVD. Mixed QP
+and the equality QP fallback are capped at 2000 observations due to dense
+quadratic memory. PFC avoids an n-by-n Hessian but does compute the spectral
+norm of the scaled control matrix. Certificates operate in floating point and
+are tolerance-dependent. A small residual is an approximate feasibility claim;
+iteration exhaustion is uncertainty, not an impossibility theorem.
+
+For equality systems, the inherited consistency/range screening may decide
+before the chosen algorithm runs. Generated infeasible problems often trigger
+that screening; this is why the benchmark includes a separate jointly
+infeasible case and a difficult boundary-feasible case.
+
+## Mathematical review and references
+
+The implementation follows Sections 4, 5, 8 and 9 of the supplied
+*Geometry, Algorithms, and Certificates for Advanced Survey Calibration*
+(20 October 2026), with an explicit correction to the universal face-fixing
+claims in *Herramientas avanzadas de calibrado en R*. The original notes and
+scripts are source material, not imported runtime code.
+
+- Deville and Särndal (1992), *Calibration estimators in survey sampling*,
+  JASA 87, 376–382: calibration distances and benchmark constraints.
+- Beck and Teboulle (2009), *A fast iterative shrinkage-thresholding algorithm
+  for linear inverse problems*, SIAM J. Imaging Sciences 2, 183–202:
+  accelerated projected/proximal objective convergence.
+- Boyd and Vandenberghe (2004), *Convex Optimization*: convex duality,
+  polyhedral KKT conditions and separation.
+- `quadprog` reference manual: `solve.QP` minimizes a strictly convex quadratic
+  subject to equality and inequality constraints.
+- `lpSolve` reference manual: primal linear programming and sparse triplets.
+- [`highs` R reference manual](https://cran.r-universe.dev/highs/doc/manual.html):
+  a possible future backend; not a dependency or an implemented solver here.
+
+See `inst/doc/MATHEMATICS.md` and `inst/doc/PROJECTIONS_AND_LITERATURE.md`
+for earlier derivations, and `inst/doc/REVIEW_0.3.0.md` for the implementation
+review. The remainder of this README retains the broader usage guide, including
+inconsistency diagnostics, signed weights, controlled bound relaxation and
+explicit margin aggregation.
+
+---
+
+## Extended reference examples
 
 - [Installation and help](#installation-and-help)
 - [1. Calibration and distance
@@ -9,8 +755,7 @@ CalTools: Advanced Calibration Tools
   metric](#3-negative-or-zero-starting-weights-require-an-explicit-metric)
 - [4. Find and explain incompatible
   totals](#4-find-and-explain-incompatible-totals)
-  - [Nearest algebraically consistent
-    totals](#nearest-algebraically-consistent-totals)
+- [Nearest algebraically consistent totals](#nearest-algebraically-consistent-totals)
 - [5. Initial screening and bounded
   feasibility](#5-initial-screening-and-bounded-feasibility)
 - [6. Projection algorithms: scope and
@@ -22,11 +767,10 @@ CalTools: Advanced Calibration Tools
   workflows](#9-automatic-and-interactive-workflows)
 - [10. Random inclusion
   probabilities](#10-random-inclusion-probabilities)
-  - [Reproducible random calibration stress
-    tests](#reproducible-random-calibration-stress-tests)
+- [Reproducible random calibration stress tests](#reproducible-random-calibration-stress-tests)
 - [11. Reproducibility and limits](#11-reproducibility-and-limits)
 
-CalTools 0.2.1 provides bounded calibration, explicit inconsistency
+CalTools 0.3.0 provides bounded calibration, explicit inconsistency
 diagnostics, feasibility checks, directional bound relaxation and
 auditable margin aggregation. All public identifiers, examples,
 messages, code comments and documentation are in English. **Version
@@ -41,7 +785,7 @@ R \>= 4.1.0 is required. Runtime dependencies are `lpSolve` and
 
 ``` r
 install.packages(c("lpSolve", "quadprog"))
-install.packages("CalTools_0.2.1.tar.gz", repos = NULL, type = "source")
+install.packages("CalTools_0.3.0.tar.gz", repos = NULL, type = "source")
 library(CalTools)
 ?calibrate_weights
 ?analyze_inconsistency
@@ -89,26 +833,19 @@ raking_fit <- calibrate_weights(X, d, totals, method = "raking")
 logit_fit <- calibrate_weights(X, d, totals, method = "logit",
   lower = seq(0, 1, length.out = 10), upper = seq(9, 12, length.out = 10))
 bounded_fit
-#> CalTools: truncated calibration ( dual )
-#> Status: optimal  | rank: 3  | max scaled residual: 2.73e-16 
-#> Weight range: 3.8 to 6.2
 crossprod(X, bounded_fit$weights)
-#>         [,1]
-#> group_A   24
-#> group_B   26
-#> age      290
 ```
 
 `lower` and `upper` always bound **final weights**, not multiplicative
 factors. Both scalar and observation-specific vector bounds are
 accepted.
 
-| Method | Domain and implementation |
-|----|----|
-| `linear` | Analytic quadratic solution in a reduced constraint space. |
+| Method      | Domain and implementation                                                                                                                                                                    |
+|-------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `linear`    | Analytic quadratic solution in a reduced constraint space.                                                                                                                                   |
 | `truncated` | Convex quadratic calibration with reversible bound activity. `solver="dual"` uses the reduced dual; `solver="qp"` uses a reference QP; `auto` may use the QP fallback for at most 2000 rows. |
-| `raking` | Entropic distance with positive starting weights; uses the full derivative including variable `q`. |
-| `logit` | Finite vector bounds strictly enclosing positive starting weights; stable logistic formulas. |
+| `raking`    | Entropic distance with positive starting weights; uses the full derivative including variable `q`.                                                                                           |
+| `logit`     | Finite vector bounds strictly enclosing positive starting weights; stable logistic formulas.                                                                                                 |
 
 Raking and logit do not accept `metric_scale`. Their multiplier
 algorithms seek interior solutions; boundary-only targets may require
@@ -118,20 +855,10 @@ infeasibility.
 ``` r
 calibration_distance(bounded_fit$weights, d, method = "truncated",
                      lower = 1, upper = c(rep(9, 9), 10))
-#> [1] 0.54
 calibration_distance_from_factors(bounded_fit$g, d, method = "truncated",
                                 lower = 1, upper = c(rep(9, 9), 10))
-#> [1] 0.54
 linear_multipliers(X, d, totals)
-#> group_A group_B     age 
-#>   -0.34   -0.76    0.10
 calibrate(X, d, totals, description = TRUE)  # Short wrapper with the same fit object
-#> CalTools: linear calibration ( linear )
-#> Status: optimal  | rank: 3  | max scaled residual: 2.73e-16 
-#> Weight range: 3.8 to 6.2
-#> CalTools: linear calibration ( linear )
-#> Status: optimal  | rank: 3  | max scaled residual: 2.73e-16 
-#> Weight range: 3.8 to 6.2
 ```
 
 Fit objects contain weights, factors `g`, multipliers `lambda`,
@@ -157,14 +884,10 @@ target_weights <- c(1, 2, 3, 2, 1)
 signed_totals <- setNames(as.numeric(crossprod(X_signed, target_weights)),
                          colnames(X_signed))
 signed_totals
-#>        N   signed contrast 
-#>        9      -27        0
 signed_fit <- calibrate_weights(X_signed, rep(2, 5), signed_totals,
   q = c(.4, .8, 1, 1.3, 2), method = "truncated",
   lower = c(.1, .2, .3, .4, .5), upper = c(4, 5, 6, 5, 4))
 signed_fit$residuals
-#>             N        signed      contrast 
-#>  3.552714e-15 -1.065814e-14  0.000000e+00
 ```
 
 The test suite also flips the signs of a column and its total together,
@@ -184,9 +907,7 @@ starting_weights <- c(-1, 0, 2, 3)
 fit <- calibrate_weights(X_small, starting_weights, c(N = 8, x = 22),
   method = "truncated", lower = 0, upper = 5, metric_scale = 1)
 fit$weights
-#> [1] 1.5 1.5 2.5 2.5
 fit$g  # NA where the starting weight is zero
-#> [1] -1.5000000         NA  1.2500000  0.8333333
 ```
 
 Use `$weights` when a starting weight is zero. If factor bounds are
@@ -207,21 +928,10 @@ computes an SVD and checks the new row against the resulting row space.
 X_conflict <- cbind(group_A = c(1, 0), group_B = c(0, 1), N = c(1, 1))
 conflicting_totals <- c(group_A = 4, group_B = 6, N = 11)
 analyze_inconsistency(X_conflict, conflicting_totals)
-#> [1] TRUE
 report <- analyze_inconsistency(X_conflict, conflicting_totals, details = TRUE)
 report
-#> Calibration totals: incompatible 
-#> Rank of X: 2  | rank after appending totals: 3 
-#>                   relation discrepancy tolerance
-#>  group_A + group_B - N = 0          -1   1.2e-07
 report$incompatibilities
-#>                             relation discrepancy tolerance sample_residual
-#> relation_1 group_A + group_B - N = 0          -1   1.2e-07    2.664535e-15
-#>            violated      margins
-#> relation_1     TRUE group_A,....
 report$coefficients
-#>            group_A group_B  N
-#> relation_1       1       1 -1
 ```
 
 `details=FALSE` preserves a simple logical result. `details=TRUE`
@@ -243,115 +953,60 @@ both settings matter.
 ``` r
 X_redundant <- cbind(X, N = X[, "group_A"] + X[, "group_B"], empty = 0)
 analyze_collinearity(X_redundant, simple = TRUE)
-#> $multicollinear
-#> [1] TRUE
-#> 
-#> $relations
-#>      group_A group_B age N empty
-#> [1,]      -1      -1   0 1     0
-#> [2,]       0       0   0 0     1
-#> 
-#> $indices
-#> [1] 4 5
-#> 
-#> $rank
-#> [1] 3
 analyze_zero_sample(X_redundant)
-#> $indices
-#> empty 
-#>     5 
-#> 
-#> $names
-#> [1] "empty"
 ```
 
 Redundancy alone is harmless if totals satisfy the same relations. A
 zero column with a nonzero total is inconsistent. The zero-sample
 diagnostic uses an absolute threshold; it never removes constraints.
 
+
 ### Nearest algebraically consistent totals
 
-`analyze_inconsistency(..., details = TRUE)$projected_totals` is a
-diagnostic computed after **column normalization**. To get the genuinely
-nearest vector in the **original total units**, use
-`closest_consistent_totals()`:
+`analyze_inconsistency(..., details = TRUE)$projected_totals` is a diagnostic
+computed after **column normalization**. To get the genuinely nearest vector
+in the **original total units**, use `closest_consistent_totals()`:
 
-``` r
+```r
 X_conflict <- cbind(group_A = c(1, 0), group_B = c(0, 1), N = c(1, 1))
 conflicting_totals <- c(group_A = 4, group_B = 6, N = 11)
 closest_consistent_totals(X_conflict, conflicting_totals)
-#>   group_A   group_B         N 
-#>  4.333333  6.333333 10.666667
 # group_A = 4.333333, group_B = 6.333333, N = 10.666667
 closest_consistent_totals(X_conflict, conflicting_totals,
                           scales = c(1, 1, 10), details = TRUE)
-#> Closest consistent totals | rank: 2 | initially consistent: FALSE 
-#> Scaled Euclidean distance: 0.09901475 
-#>         original  adjusted   adjustment
-#> group_A        4  4.009804  0.009803922
-#> group_B        6  6.009804  0.009803922
-#> N             11 10.019608 -0.980392157
 ```
 
-It minimizes `sum(((t_star - totals)/scales)^2)/2`, subject to the
-existence of **some** (possibly unbounded or negative) `w` with
-`crossprod(X,w)=t_star`. The optional `scales` control which totals are
-trusted most; larger values permit larger changes. **This does not
-ensure bounded-weight feasibility.** Check the adjusted vector again
-with `calibration_preflight()` if needed.
+It minimizes `sum(((t_star - totals)/scales)^2)/2`, subject to the existence of
+**some** (possibly unbounded or negative) `w` with `crossprod(X,w)=t_star`.
+The optional `scales` control which totals are trusted most; larger values
+permit larger changes. **This does not ensure bounded-weight feasibility.**
+Check the adjusted vector again with `calibration_preflight()` if needed.
 
 ## 5. Initial screening and bounded feasibility
 
 ``` r
 calibration_preflight(X_conflict, conflicting_totals, lower = 0, upper = 10)
-#> CalTools preflight: inconsistent_totals 
-#> Calibration totals: incompatible 
-#> Rank of X: 2  | rank after appending totals: 3 
-#>                   relation discrepancy tolerance
-#>  group_A + group_B - N = 0          -1   1.2e-07
 consistent_totals <- c(group_A = 4, group_B = 6, N = 10)
 calibration_preflight(X_conflict, consistent_totals, lower = 0, upper = 3)
-#> CalTools preflight: bound_infeasible 
-#> Calibration totals: consistent 
-#> Rank of X: 2  | rank after appending totals: 2 
-#> Equalities are consistent, but no weights satisfy the supplied bounds.
 calibration_preflight(X_conflict, consistent_totals, lower = 0, upper = 10)
-#> CalTools preflight: feasible 
-#> Calibration totals: consistent 
-#> Rank of X: 2  | rank after appending totals: 2
 ```
 
 The statuses separate `inconsistent_totals`, `bound_infeasible`,
 `feasible` and `numerical_failure`. Moving bounds cannot repair
-incompatible equalities. Preflight and bounded feasibility require
-finite bounds.
+incompatible equalities. Equality preflight and equality feasibility require
+finite bounds; mixed feasibility also supports infinite bounds.
 
 ``` r
 check <- calibration_feasibility(X, totals, lower = 1, upper = 10)
 check[c("feasible", "status", "solver", "max_scaled_residual")]
-#> $feasible
-#> [1] TRUE
-#> 
-#> $status
-#> [1] "feasible"
-#> 
-#> $solver
-#> [1] "dual-witness"
-#> 
-#> $max_scaled_residual
-#> [1] 4.440892e-16
 calibration_feasibility(X, totals, 1, 10, method = "lp")$feasible
-#> [1] TRUE
 is_feasible(X, totals, lower = 1, upper = 10)
-#> [1] TRUE
 is_feasible_fast(X, totals, lower = 1, upper = 10)
-#> [1] TRUE
 is_feasible_lp(X, totals, lower = 1, upper = 10)
-#> [1] TRUE
 ```
 
 `TRUE` includes a checked witness. `FALSE` comes from an inconsistent
-equality system, a box-support certificate, or the LP solver’s
+equality system, a box-support or PFC separation certificate, or the LP solver’s
 infeasible status. `NA` means inconclusive. Boolean wrappers raise an
 error on an inconclusive result. The LP uses $w=L+z$, with $z\ge0$, and
 sparse constraint triplets. `is_feasible_fast` shares the validated
@@ -367,24 +1022,13 @@ bound activity to change.
 projection_check <- calibration_feasibility(X, totals, 1, 10,
   method = "projection", max_iter = 5000, fallback = FALSE)
 projection_check[c("feasible", "status", "solver", "max_scaled_residual")]
-#> $feasible
-#> [1] TRUE
-#> 
-#> $status
-#> [1] "feasible"
-#> 
-#> $solver
-#> [1] "alternating-projections"
-#> 
-#> $max_scaled_residual
-#> [1] 5.921189e-16
 ```
 
 The affine projection reuses an orthonormal basis. Its per-iteration
 cost is $O(nr)$ after reduction, where $r$ is the constraint rank. With
 `fallback=FALSE`, iteration exhaustion returns `NA`, not `FALSE`; with
-`fallback=TRUE`, it runs the LP. `method="auto"` remains the quadratic
-dual with LP fallback, not ordinary alternating projections. Ordinary
+`fallback=TRUE`, it runs the LP. `method="auto"` uses the PFC hybrid
+with LP fallback described above. Ordinary
 alternating projections are used here only to find a feasible witness,
 not to claim the closest calibrated weights.
 
@@ -412,58 +1056,10 @@ not the nearest box under every possible metric.
 
 ``` r
 relax_bounds(matrix(1, 3, 1), 9, 0, 2, lower_rate = 0, upper_rate = 1)
-#> $status
-#> [1] "optimal"
-#> 
-#> $rho
-#> [1] 1
-#> 
-#> $lower
-#> [1] 0 0 0
-#> 
-#> $upper
-#> [1] 3 3 3
-#> 
-#> $weights
-#> [1] 3 3 3
 analyze_feasibility_bounds(X, totals, d, type = "g-weight", method = "upper",
   bounds = c(.9, 1.1), search_limits = 2, step = .1)
-#> $bounds
-#> [1] 0.9 1.6
-#> 
-#> $lower
-#>  [1] 4.5 4.5 4.5 4.5 4.5 4.5 4.5 4.5 4.5 4.5
-#> 
-#> $upper
-#>  [1] 8 8 8 8 8 8 8 8 8 8
-#> 
-#> $weights
-#>  [1] 4.5 4.5 4.5 4.5 6.0 4.5 4.5 4.5 4.5 8.0
-#> 
-#> $status
-#> [1] 0
-#> 
-#> $grid_index
-#> [1] 6
 analyze_feasibility_bounds(matrix(1, 2, 1), 1, c(10, 20),
   type = "w-weight", method = "lower", bounds = c(1, 2), search_limits = 0, step = .25)
-#> $bounds
-#> [1] 0.5 2.0
-#> 
-#> $lower
-#> [1] 0.5 0.5
-#> 
-#> $upper
-#> [1] 2 2
-#> 
-#> $weights
-#> [1] 0.5 0.5
-#> 
-#> $status
-#> [1] 0
-#> 
-#> $grid_index
-#> [1] 3
 ```
 
 The grid interface uses binary search on nested boxes. `both` expands
@@ -477,97 +1073,14 @@ weights; `w-weight` endpoints are absolute.
 ``` r
 merged <- merge_margins(X, totals, c("group_A", "group_B"), "N")
 merged$totals
-#> age   N 
-#> 290  50
 drop_margins(X, totals, "age")$totals
-#> group_A group_B 
-#>      24      26
 check_modified_feasibility(X, totals, d, lower = 4.5, upper = 5.5,
   margin_names = c("group_A", "group_B"), action = "join", merged_name = "N",
   bounds = c(.9, 1.1), search_limits = 2, step = .1)
-#> $X
-#>       age N
-#>  [1,]   1 1
-#>  [2,]   2 1
-#>  [3,]   3 1
-#>  [4,]   4 1
-#>  [5,]   5 1
-#>  [6,]   6 1
-#>  [7,]   7 1
-#>  [8,]   8 1
-#>  [9,]   9 1
-#> [10,]  10 1
-#> 
-#> $totals
-#> age   N 
-#> 290  50 
-#> 
-#> $bounds
-#> [1] 0.9 1.2
-#> 
-#> $lower
-#>  [1] 4.5 4.5 4.5 4.5 4.5 4.5 4.5 4.5 4.5 4.5
-#> 
-#> $upper
-#>  [1] 6 6 6 6 6 6 6 6 6 6
-#> 
-#> $weights
-#>  [1] 4.5 4.5 4.5 4.5 4.6 4.9 5.2 5.5 5.8 6.0
-#> 
-#> $status
-#> [1] 0
-#> 
-#> $grid_index
-#> [1] 2
 check_sequential_feasibility(X, totals, d, lower = 4.5, upper = 5.5,
   margin_names_list = list(c("group_A", "group_B"), "age"),
   actions = c("join", "suppress"), merged_names = list("N", NULL),
   bounds = c(.9, 1.1), search_limits = 2, step = .1)
-#> $X
-#>       age N
-#>  [1,]   1 1
-#>  [2,]   2 1
-#>  [3,]   3 1
-#>  [4,]   4 1
-#>  [5,]   5 1
-#>  [6,]   6 1
-#>  [7,]   7 1
-#>  [8,]   8 1
-#>  [9,]   9 1
-#> [10,]  10 1
-#> 
-#> $totals
-#> age   N 
-#> 290  50 
-#> 
-#> $bounds
-#> [1] 0.9 1.2
-#> 
-#> $lower
-#>  [1] 4.5 4.5 4.5 4.5 4.5 4.5 4.5 4.5 4.5 4.5
-#> 
-#> $upper
-#>  [1] 6 6 6 6 6 6 6 6 6 6
-#> 
-#> $weights
-#>  [1] 4.5 4.5 4.5 4.5 4.6 4.9 5.2 5.5 5.8 6.0
-#> 
-#> $status
-#> [1] 0
-#> 
-#> $grid_index
-#> [1] 2
-#> 
-#> $iter
-#> [1] 1
-#> 
-#> $history
-#> $history[[1]]
-#> $history[[1]]$action
-#> [1] "join"
-#> 
-#> $history[[1]]$variables
-#> [1] "group_A" "group_B"
 ```
 
 Merging sums columns and totals; dropping removes equations. Both weaken
@@ -585,14 +1098,9 @@ substantive meaning.
 margin_groups <- list(c("group_A", "group_B"))
 recommend_margin_merges(X, d, totals, margin_groups = margin_groups,
                        ordered = FALSE, criterion = "sample")
-#> [[1]]
-#> [1] "group_A" "group_B"
 recommend_margin_merges(X, d, totals, margin_groups = margin_groups,
                        ordered = FALSE, criterion = "lambda")
-#> [[1]]
-#> [1] "group_B" "group_A"
 adjacent_elements(c("young", "middle", "older"), 2)
-#> [1] "young" "older"
 ```
 
 Recommendations are heuristics. Multiplier scores are scaled by column
@@ -609,41 +1117,9 @@ candidates <- automatic_calibration(X_search, search_totals, rep(1, 3),
   margin_groups = list(c("A", "B", "C")), ordered = TRUE,
   max_depth = 2, max_solutions = 3)
 candidates
-#> CalTools search: 1 candidate(s); exhausted 
-#> CalTools preflight: bound_infeasible 
-#> Calibration totals: consistent 
-#> Rank of X: 3  | rank after appending totals: 3 
-#> Equalities are consistent, but no weights satisfy the supplied bounds.
-#> Candidate 1 | merges: 2 | objective: 1.5
 attr(candidates, "preflight")
-#> CalTools preflight: bound_infeasible 
-#> Calibration totals: consistent 
-#> Rank of X: 3  | rank after appending totals: 3 
-#> Equalities are consistent, but no weights satisfy the supplied bounds.
 candidates[[1]]$history
-#> [[1]]
-#> [[1]]$action
-#> [1] "join"
-#> 
-#> [[1]]$variables
-#> [1] "A" "B"
-#> 
-#> [[1]]$name
-#> [1] "A+B"
-#> 
-#> 
-#> [[2]]
-#> [[2]]$action
-#> [1] "join"
-#> 
-#> [[2]]$variables
-#> [1] "A+B" "C"  
-#> 
-#> [[2]]$name
-#> [1] "A+B+C"
 candidates[[1]]$residuals_original
-#>  A  B  C 
-#>  2  2 -4
 ```
 
 The breadth-first search updates groups and deduplicates equivalent
@@ -658,19 +1134,11 @@ bad_totals <- c(A = 2, B = 5)
 stopped <- automatic_calibration(X_inconsistent, bad_totals, c(1, 1),
   lower = 0, upper = 10, margin_groups = list(c("A", "B")), ordered = TRUE)
 stopped  # No bound search or fitting: the original equalities conflict.
-#> CalTools search: 0 candidate(s); inconsistent_totals 
-#> CalTools preflight: inconsistent_totals 
-#> Calibration totals: incompatible 
-#> Rank of X: 1  | rank after appending totals: 2 
-#>         relation discrepancy tolerance
-#>  A - 0.5 * B = 0        -0.5     4e-06
 # Explicitly permit changing the equalities through aggregation:
 merged_candidates <- automatic_calibration(X_inconsistent, bad_totals, c(1, 1),
   lower = 0, upper = 10, margin_groups = list(c("A", "B")), ordered = TRUE,
   on_inconsistency = "merge")
 merged_candidates[[1]]$residuals_original
-#>          A          B 
-#>  0.3333333 -0.3333333
 ```
 
 `on_inconsistency="stop"` is the default. It returns an empty search
@@ -685,11 +1153,7 @@ selected <- interactive_calibration(X_search, search_totals, rep(1, 3),
   bounds = c(1, 3), search_limits = c(1, 3),
   choose = function(candidates) 1L)
 selected$fit
-#> CalTools: truncated calibration ( dual )
-#> Status: optimal  | rank: 1  | max scaled residual: 2.96e-16 
-#> Weight range: 2 to 2
 selected$preflight$status
-#> [1] "bound_infeasible"
 ```
 
 In an interactive R console, omit `choose` to see the initial diagnostic
@@ -703,8 +1167,6 @@ returns `NULL`.
 set.seed(12)
 probabilities <- random_inclusion_probabilities(N = 100, n = 10)
 c(sum = sum(probabilities), minimum = min(probabilities), maximum = max(probabilities))
-#>          sum      minimum      maximum 
-#> 10.000000000  0.006041989  0.418737381
 ```
 
 The generator normalizes exponential sizes with certainty units. It
@@ -712,15 +1174,15 @@ returns values in $[0,1]$ summing to `n`, including the endpoints `n=0`
 and `n=N`. It is not uniform on the fixed-sum polytope and does not
 reproduce the old beta-rejection distribution.
 
+
 ### Reproducible random calibration stress tests
 
 The generator constructs categorical partitions (complete sets of dummy
-variables), binary, signed and positive numeric variables, zero-sample
-margins and exactly dependent columns. It returns the `X`, `totals`,
-`d`, `q`, vector bounds and `margin_groups` accepted directly by the
-current public API.
+variables), binary, signed and positive numeric variables, zero-sample margins
+and exactly dependent columns. It returns the `X`, `totals`, `d`, `q`, vector
+bounds and `margin_groups` accepted directly by the current public API.
 
-``` r
+```r
 feasible_case <- generate_calibration_problem(
   n = 30, categorical_groups = c(5, 4), n_binary = 2, n_continuous = 1,
   n_zero = 1, n_derived = 1, difficulty = .25, seed = 42)
@@ -750,22 +1212,21 @@ analyze_inconsistency(bad_case$X, bad_case$totals)
 closest_consistent_totals(bad_case$X, bad_case$totals)
 ```
 
-**Operational difficulty:** for `difficulty <= 0.5`, a known solution
-meets all initial bounds; for `difficulty > 0.5`, the totals violate the
-box support of at least one margin and require relaxing or weakening
-constraints. With `stress_pattern="local"`, this targets a low-frequency
-category to exercise aggregation strategies; with `"global"`, it
-stresses all observations and is better for bound-expansion benchmarks.
-`max_excess` sets the maximum extra excursion. The parameter does
-**not** prescribe a particular number of search nodes or margin merges.
-`inconsistency="linear"` or `"zero"` independently creates contradictory
-equations; these cannot be fixed by bounds alone.
+**Operational difficulty:** for `difficulty <= 0.5`, a known solution meets
+all initial bounds; for `difficulty > 0.5`, the totals violate the box support
+of at least one margin and require relaxing or weakening constraints. With
+`stress_pattern="local"`, this targets a low-frequency category to exercise
+aggregation strategies; with `"global"`, it stresses all observations and is
+better for bound-expansion benchmarks. `max_excess` sets the maximum extra
+excursion. The parameter does **not** prescribe a particular number of search
+nodes or margin merges. `inconsistency="linear"` or `"zero"` independently
+creates contradictory equations; these cannot be fixed by bounds alone.
 
-Legacy-style fields `Xs`, `total`, `L_bounds`, `U_bounds`, `mar_2_join`
-and `hierarchy` are available on the generated object, but the **package
-function names** follow the 0.2.x migration (`automatic_calibration`,
-`calibration_preflight`, `analyze_collinearity`, etc.). For repeated
-runs see `inst/benchmarks/random-problems.R`.
+Legacy-style fields `Xs`, `total`, `L_bounds`, `U_bounds`, `mar_2_join` and
+`hierarchy` are available on the generated object, but the **package function
+names** follow the 0.2.x migration (`automatic_calibration`,
+`calibration_preflight`, `analyze_collinearity`, etc.). For repeated runs see
+`inst/benchmarks/random-problems.R`.
 
 ## 11. Reproducibility and limits
 
@@ -782,7 +1243,7 @@ testthat::test_local("CalTools")
 rmarkdown::render("CalTools/README.Rmd")
 # In a terminal:
 # R CMD build CalTools
-# R CMD check --no-manual CalTools_0.2.1.tar.gz
+# R CMD check --no-manual CalTools_0.3.0.tar.gz
 ```
 
 The numerical core is dense. Initial reduction costs about $O(np^2)$ for

@@ -13,10 +13,17 @@ calibrate_weights(
   lower = NULL,
   upper = NULL,
   metric_scale = NULL,
-  solver = c("auto", "dual", "qp"),
+  solver = c("auto", "dual", "qp", "projection", "newton", "osqp", "dykstra",
+    "dual_newton", "quadprog"),
   tol = 1e-08,
   rank_tol = 1e-10,
-  max_iter = 500L
+  max_iter = 500L,
+  direction = "=",
+  projection_action = c("report", "refine", "error"),
+  control = list(),
+  warm_start = NULL,
+  total_lower = NULL,
+  total_upper = NULL
 )
 }
 \arguments{
@@ -35,14 +42,24 @@ calibrate_weights(
 \item{metric_scale}{Positive quadratic scale. Default is d, requiring d>0.
 For signed or zero d specify a positive scale explicitly.}
 
-\item{solver}{Quadratic solver: auto tries the low-dimensional dual then a
-dense QP fallback (at most 2000 observations); qp forces the reference QP.}
+\item{solver}{Legacy dual, qp, projection, newton; new quadratic choices
+quadprog, osqp, dykstra, dual_newton. auto preserves historical routes
+for small dense inputs and calls calibrate_quadratic for sparse inputs
+or more than 2000 rows. See calibrate_quadratic for details.}
 
 \item{tol}{Relative/absolute calibration tolerance using max(1,abs(totals)).}
 
 \item{rank_tol}{Relative SVD rank tolerance after column scaling.}
 
 \item{max_iter}{Iteration budget for each dual optimization phase.}
+
+\item{direction}{Scalar or per-column vector of '=', '<=', '>='.
+Inequalities support quadratic distances; select a quadratic solver.}
+
+\item{projection_action}{report returns a feasible projection with its
+certificate, refine solves again if not certified, error requires certification.}
+
+\item{control, warm_start, total_lower, total_upper}{See [calibrate_quadratic()].}
 }
 \value{
 A caltools_fit list. The first two entries are g and lambda for legacy

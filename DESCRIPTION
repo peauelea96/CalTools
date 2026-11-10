@@ -1,8 +1,8 @@
 Package: CalTools
 Type: Package
 Title: Advanced Calibration Diagnostics and Bounded Weight Adjustment
-Version: 0.2.1
-Authors@R: person("Pedro", role = c("aut", "cre"), email = "pedro.garcia.segador@ine.es")
+Version: 0.4.0
+Authors@R: person("Pedro", role = c("aut", "cre"), email = "maintainer@example.org")
 Description: Calibration with vector bounds, explicitly positive quadratic
     metrics, feasibility diagnostics, minimal directional bound expansion,
     margin aggregation and reproducible search workflows. Low-dimensional
@@ -12,7 +12,7 @@ Description: Calibration with vector bounds, explicitly positive quadratic
 License: GPL (>= 2)
 Encoding: UTF-8
 Depends: R (>= 4.1.0)
-Imports: stats, utils, lpSolve, quadprog
-Suggests: testthat (>= 3.0.0), knitr, rmarkdown, sampling
+Imports: stats, utils, methods, Matrix, lpSolve, quadprog
+Suggests: osqp, testthat (>= 3.0.0), knitr, rmarkdown, sampling
 Config/testthat/edition: 3
-RoxygenNote: 7.3.3
+RoxygenNote: 7.3.1

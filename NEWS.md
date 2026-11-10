@@ -1,3 +1,19 @@
+# CalTools 0.3.0
+
+* Added projection-and-fixing calibration with independent KKT, dual-gap and
+  error-bound diagnostics; report/refine/error policies keep uncertainty explicit.
+* Added centre-fixing feasibility as a witness-only heuristic and PFC accelerated
+  projected residual minimization with checked separation certificates.
+* Added per-control =, <= and >= directions. Mixed quadratic calibration uses one
+  QP backend, and mixed feasibility uses one LP backend with sparse triplets.
+* Exposed feasibility backend, iteration budget and fallback throughout bound
+  searches, margin modifications, automatic and assisted calibration.
+* Raking/logit identify their damped Newton/BFGS route and reject invalid solvers.
+* Recovered signed equality multipliers from QP stationarity and fixed the existing
+  empty-control naming edge case in closest_consistent_totals.
+* Expanded README, runnable examples, exact counterexample regression tests and
+  repeated benchmarks with status-aware timing comparisons.
+
 # CalTools 0.2.1
 
 * Added `closest_consistent_totals()` to project incompatible total vectors onto

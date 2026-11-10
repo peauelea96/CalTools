@@ -1,0 +1,22 @@
+advanced: .......................................'as(<dsCMatrix>, "dgCMatrix")' is deprecated.
+Use 'as(., "generalMatrix")' instead.
+See help("Deprecated") and help("Matrix-deprecated").
+..........................................................................
+calibration: ......raking: using damped Newton-Raphson (BFGS safeguard if needed)
+.....................................................................................................................raking: using damped Newton-Raphson (BFGS safeguard if needed)
+..logit: using damped Newton-Raphson (BFGS safeguard if needed)
+...........raking: using damped Newton-Raphson (BFGS safeguard if needed)
+.
+diagnostics: .............................................
+generation-and-projection: ...................................................................
+negative-totals: ......raking: using damped Newton-Raphson (BFGS safeguard if needed)
+.raking: using damped Newton-Raphson (BFGS safeguard if needed)
+.logit: using damped Newton-Raphson (BFGS safeguard if needed)
+.logit: using damped Newton-Raphson (BFGS safeguard if needed)
+............
+sparse-solvers: ...............................................................................................................................................................................................................................................................................................................
+tools: ...............................................................................................
+
+══ DONE ════════════════════════════════════════════════════════════════════════
+ failed   error warning  passed 
+      0       0       0     781 

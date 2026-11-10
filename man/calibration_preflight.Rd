@@ -4,7 +4,17 @@
 \alias{calibration_preflight}
 \title{Diagnose a calibration problem before searching or fitting}
 \usage{
-calibration_preflight(X, totals, lower, upper, tol = 1e-08, rank_tol = 1e-10)
+calibration_preflight(
+  X,
+  totals,
+  lower,
+  upper,
+  tol = 1e-08,
+  rank_tol = 1e-10,
+  feasibility_method = "auto",
+  feasibility_max_iter = 500L,
+  feasibility_fallback = TRUE
+)
 }
 \arguments{
 \item{X}{Numeric matrix, observations in rows and margins in columns.}
@@ -16,6 +26,12 @@ calibration_preflight(X, totals, lower, upper, tol = 1e-08, rank_tol = 1e-10)
 \item{tol}{Relative/absolute calibration tolerance using max(1,abs(totals)).}
 
 \item{rank_tol}{Relative SVD rank tolerance after column scaling.}
+
+\item{feasibility_method}{Feasibility backend passed to calibration_feasibility.}
+
+\item{feasibility_max_iter}{Iteration budget for feasibility.}
+
+\item{feasibility_fallback}{Allow LP after an inconclusive iterative check.}
 }
 \value{
 A caltools_preflight list with status, consistency, feasibility and
